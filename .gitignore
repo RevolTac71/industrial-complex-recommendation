@@ -1,0 +1,10 @@
+.env
+.venv/
+__pycache__/
+.ipynb_checkpoints/
+*.log
+.agents/
+task.md
+implementation_plan.md
+walkthrough.md
+*.key

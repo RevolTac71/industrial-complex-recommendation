@@ -1,0 +1,11 @@
+streamlit
+streamlit-folium
+folium
+geopandas
+shapely
+pandas
+numpy
+google-generativeai
+python-dotenv
+sqlalchemy
+psycopg2-binary
