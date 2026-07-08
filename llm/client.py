@@ -49,29 +49,48 @@ class GeminiLLMClient:
                 
     def get_weight_recommendation(self, user_input: str) -> dict:
         """
-        사용자의 요구사항을 파싱하여 가중치를 제안받습니다.
+        사용자의 요구사항을 바탕으로 구글 검색(Grounding)을 돌려 
+        실제 뉴스 기사나 논문 출처 링크를 포함한 가중치 결과를 반환합니다.
         """
         if not self.is_configured:
             raise ValueError("GEMINI_API_KEY가 설정되어 있지 않거나 설정에 실패했습니다.")
             
         try:
-            model = genai.GenerativeModel(
+            # 1단계: Google Search Grounding을 통해 실재하는 기사/논문 출처 수집 (토큰 최적화용 단문 요약)
+            search_model = genai.GenerativeModel(
+                model_name="gemini-3.1-flash-lite",
+                tools="google_search"
+            )
+            search_prompt = (
+                f"사용자의 산업단지 입지 요구사항인 '{user_input}'과 관련된 국내외 입지 기준, 정부 정책 뉴스 기사, "
+                "또는 학술 연구 자료를 구글에서 찾은 뒤, 가장 대표성 있는 기사/논문의 [제목](URL 링크) 1~2개와 핵심 논거를 "
+                "최대 150자 내외로 매우 압축하여 한글로 기술해 주세요."
+            )
+            search_response = search_model.generate_content(search_prompt)
+            search_grounding = search_response.text if search_response.text else "관련 논거 기사를 찾지 못했습니다."
+
+            # 2단계: 수집된 실재 기사/논문 링크 정보를 컨텍스트로 주입하여 최종 가중치 JSON 구조화 출력 생성
+            struct_model = genai.GenerativeModel(
                 model_name="gemini-3.1-flash-lite",
                 generation_config={
                     "response_mime_type": "application/json",
                     "response_schema": WeightRecommendation,
                     "temperature": 0.2
                 },
-                system_instruction=SYSTEM_INSTRUCTION
+                system_instruction=SYSTEM_INSTRUCTION + f"\n\n[실시간 구글 검색 근거 및 링크]\n{search_grounding}"
             )
             
-            prompt = USER_PROMPT_TEMPLATE.format(user_input=user_input)
-            response = model.generate_content(prompt)
+            prompt = (
+                f"사용자의 요구사항 '{user_input}'을 바탕으로 5대 지표별 가중치(합산 1.0)를 결정하고, "
+                "위 제공된 [실시간 구글 검색 근거 및 링크]의 마크다운 포맷(기사/논문 제목 및 파란색 링크 URL)을 "
+                "반드시 포함하여 추천 사유(reason)를 작성해 주세요."
+            )
+            response = struct_model.generate_content(prompt)
             
             result = json.loads(response.text)
             return result
         except Exception as e:
-            logging.error(f"Gemini 호출 중 오류 발생: {e}")
+            logging.error(f"Gemini 가중치 추천 호출 중 오류 발생: {e}")
             raise e
 
     def get_top_complexes_details(self, complexes: list[str]) -> dict:
