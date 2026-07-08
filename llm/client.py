@@ -38,12 +38,16 @@ class GeminiLLMClient:
     
     def __init__(self):
         import streamlit as st
+        self.api_key_source = "None"
         # 1순위: Streamlit secrets에서 가져옴
         if "GEMINI_API_KEY" in st.secrets and st.secrets["GEMINI_API_KEY"]:
             self.api_key = st.secrets["GEMINI_API_KEY"]
+            self.api_key_source = "Streamlit Secrets"
         # 2순위: 환경 변수(.env 등)에서 가져옴
         else:
             self.api_key = os.getenv("GEMINI_API_KEY")
+            if self.api_key:
+                self.api_key_source = "Environment Variable (.env)"
         self.is_configured = False
         
         if self.api_key:
@@ -52,6 +56,17 @@ class GeminiLLMClient:
                 self.is_configured = True
             except Exception as e:
                 logging.error(f"Gemini API configure 실패: {e}")
+                
+    def get_masked_api_key(self) -> str:
+        """
+        API Key 보안을 위해 마스킹된 문자열을 반환합니다.
+        """
+        if not self.api_key:
+            return "None"
+        key_str = str(self.api_key)
+        if len(key_str) <= 10:
+            return "*****"
+        return f"{key_str[:8]}...{key_str[-4:]}"
                 
     def get_weight_recommendation(self, user_input: str) -> dict:
         """
