@@ -105,13 +105,7 @@ def update_weights(changed_key, widget_type):
 # ==================== 사이드바: LLM 챗봇 및 가중치 조정 ====================
 st.sidebar.header("💬 가중치 추천 챗봇")
 
-# 디버깅용: 로드된 API Key 상태 및 출처 마스킹 출력
-if hasattr(llm_client, "api_key") and llm_client.api_key:
-    masked_key = llm_client.get_masked_api_key()
-    st.sidebar.caption(f"🔑 **API Key**: `{masked_key}` ({llm_client.api_key_source})")
-    st.sidebar.caption(f"🤖 **Model**: `{llm_client.model_name}`")
-else:
-    st.sidebar.caption("🔑 **API Key**: `미설정` (API 호출 불가)")
+
 
 
 chat_container = st.sidebar.container(height=320)
