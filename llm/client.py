@@ -108,42 +108,23 @@ class GeminiLLMClient:
         실제 가중치 추천 요청을 전송하는 핵심 로직.
         """
         # 1단계: Google Search Grounding을 통해 실재하는 기사/논문 출처 수집 (토큰 최적화용 단문 요약)
-        # 구형 SDK 버전 한계로 인해 최신 모델에서 검색 툴을 쓰면 필드 오류가 나거나 API 400 에러가 날 수 있으므로
-        # 예외 처리를 감싸 검색 실패 시에도 전체 기능이 중단되지 않고 일반 추론으로 동작하게 만듭니다.
+        # 구형 SDK 버전 계열을 사용하는 한, 모델명에 관계없이 구글 검색 도구는 항상 [{"google_search_retrieval": {}}] 로 단일 지정해야 에러가 발생하지 않습니다.
         search_grounding = "관련 논거 기사를 찾지 못했습니다."
-        if "1.5" in model_name:
-            try:
-                search_model = genai.GenerativeModel(
-                    model_name=model_name,
-                    tools=[{"google_search_retrieval": {}}]
-                )
-                search_prompt = (
-                    f"사용자의 산업단지 입지 요구사항인 '{user_input}'과 관련된 국내외 입지 기준, 정부 정책 뉴스 기사, "
-                    "또는 학술 연구 자료를 구글에서 찾은 뒤, 가장 대표성 있는 기사/논문의 [제목](URL 링크) 1~2개와 핵심 논거를 "
-                    "최대 150자 내외로 매우 압축하여 한글로 기술해 주세요."
-                )
-                search_response = search_model.generate_content(search_prompt)
-                if search_response and search_response.text:
-                    search_grounding = search_response.text
-            except Exception as e:
-                logging.warning(f"Google Search Grounding 비활성화 혹은 실패 (일반 LLM 추론으로 폴백): {e}")
-        else:
-            try:
-                # 최신 3.x/2.x 버전 계열은 google_search 도구를 사용할 수 있으므로 시도
-                search_model = genai.GenerativeModel(
-                    model_name=model_name,
-                    tools=[{"google_search": {}}]
-                )
-                search_prompt = (
-                    f"사용자의 산업단지 입지 요구사항인 '{user_input}'과 관련된 국내외 입지 기준, 정부 정책 뉴스 기사, "
-                    "또는 학술 연구 자료를 구글에서 찾은 뒤, 가장 대표성 있는 기사/논문의 [제목](URL 링크) 1~2개와 핵심 논거를 "
-                    "최대 150자 내외로 매우 압축하여 한글로 기술해 주세요."
-                )
-                search_response = search_model.generate_content(search_prompt)
-                if search_response and search_response.text:
-                    search_grounding = search_response.text
-            except Exception as e:
-                logging.warning(f"최신 모델 검색 툴 연동 실패 혹은 미지원으로 검색 도구 비활성화: {e}")
+        try:
+            search_model = genai.GenerativeModel(
+                model_name=model_name,
+                tools=[{"google_search_retrieval": {}}]
+            )
+            search_prompt = (
+                f"사용자의 산업단지 입지 요구사항인 '{user_input}'과 관련된 국내외 입지 기준, 정부 정책 뉴스 기사, "
+                "또는 학술 연구 자료를 구글에서 찾은 뒤, 가장 대표성 있는 기사/논문의 [제목](URL 링크) 1~2개와 핵심 논거를 "
+                "최대 150자 내외로 매우 압축하여 한글로 기술해 주세요."
+            )
+            search_response = search_model.generate_content(search_prompt)
+            if search_response and search_response.text:
+                search_grounding = search_response.text
+        except Exception as e:
+            logging.warning(f"Google Search Grounding 비활성화 혹은 실패 (일반 LLM 추론으로 폴백): {e}")
 
         # 2단계: 수집된 실재 기사/논문 링크 정보를 컨텍스트로 주입하여 최종 가중치 JSON 구조화 출력 생성
         struct_model = genai.GenerativeModel(
