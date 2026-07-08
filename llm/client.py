@@ -47,11 +47,10 @@ class GeminiLLMClient:
             self.api_key = None
             self.api_key_source = "Not Found in Secrets"
             
-        # Streamlit secrets에서 사용할 Gemini 모델명을 설정 가능하도록 함 (기본값은 안정적인 gemini-1.5-flash로 수정)
         if "GEMINI_MODEL" in st.secrets and st.secrets["GEMINI_MODEL"]:
             self.model_name = st.secrets["GEMINI_MODEL"].strip()
         else:
-            self.model_name = "gemini-1.5-flash"
+            self.model_name = "gemini-3.1-flash-lite"
             
         self.is_configured = False
         
@@ -86,9 +85,15 @@ class GeminiLLMClient:
             
         try:
             # 1단계: Google Search Grounding을 통해 실재하는 기사/논문 출처 수집 (토큰 최적화용 단문 요약)
+            # gemini-1.5 모델은 google_search_retrieval을 사용하고, gemini-2.0, 2.5 이상 모델은 google_search를 사용하도록 분기 처리
+            if "1.5" in self.model_name:
+                search_tools = [{"google_search_retrieval": {}}]
+            else:
+                search_tools = [{"google_search": {}}]
+                
             search_model = genai.GenerativeModel(
                 model_name=self.model_name,
-                tools=[{"google_search_retrieval": {}}]
+                tools=search_tools
             )
             search_prompt = (
                 f"사용자의 산업단지 입지 요구사항인 '{user_input}'과 관련된 국내외 입지 기준, 정부 정책 뉴스 기사, "
