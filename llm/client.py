@@ -52,6 +52,9 @@ class GeminiLLMClient:
         
         if self.api_key:
             try:
+                # SDK 내부에서 os.environ 환경 변수를 직접 다시 읽어와 사용하는 것을 대비해
+                # 시스템 환경 변수 값 자체를 새 API 키로 강제 업데이트합니다.
+                os.environ["GEMINI_API_KEY"] = self.api_key
                 genai.configure(api_key=self.api_key)
                 self.is_configured = True
             except Exception as e:
