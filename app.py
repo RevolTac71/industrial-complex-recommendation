@@ -167,69 +167,53 @@ if "recommendation_reason" in st.session_state and st.session_state.recommendati
 st.sidebar.write("---")
 
 
-# ==================== 단일 정규화 데이터 로드 (DB 연동 및 실시간 정규화) ====================
+# ==================== 단일 정규화 데이터 로드 (DB 연동) ====================
 @st.cache_data
 def load_data():
     db_url = os.getenv("DATABASE_URL")
     if not db_url and "DATABASE_URL" in st.secrets:
         db_url = st.secrets["DATABASE_URL"]
         
-    df_raw = None
+    normalized_df = None
     location_df = None
     
     if db_url:
         try:
             engine = create_engine(db_url)
+            # Neon DB에서 dan_normalized 데이터 쿼리
+            normalized_df = pd.read_sql("SELECT * FROM dan_normalized", con=engine)
             # Neon DB에서 dan_integrated 데이터 쿼리
-            df_raw = pd.read_sql("SELECT * FROM dan_integrated", con=engine)
-            location_df = df_raw.copy()
+            location_df = pd.read_sql("SELECT * FROM dan_integrated", con=engine)
         except Exception as e:
             st.warning(f"⚠️ DB 연결 실패, 로컬 백업 로드를 시도합니다: {e}")
             
     # 로컬 fallback
-    if df_raw is None:
+    if normalized_df is None:
         data_dir = "./data"
-        integrated_files = glob.glob(os.path.join(data_dir, "*통합*.csv"))
-        if integrated_files:
-            try:
-                df_raw = pd.read_csv(integrated_files[0], encoding="cp949")
-            except Exception:
-                df_raw = pd.read_csv(integrated_files[0], encoding="utf-8")
-            location_df = df_raw.copy()
-
-    normalized_df = None
-    if df_raw is not None:
-        # 실시간 MinMax 정규화 수행
-        normalized_df = df_raw.copy()
         
-        # 1. 일반 지표 (클수록 좋은 지표)
-        larger_is_better = [
-            'univ_count', '연구소전담부서', 'mart_count', 'store_count',
-            'hospital_count', 'pharmacy_count', 'subway_count', 'bus_count', '낙후도지수'
-        ]
-        for col in larger_is_better:
-            if col in df_raw.columns:
-                raw_col = pd.to_numeric(df_raw[col], errors='coerce').fillna(0.0)
-                col_min = raw_col.min()
-                col_max = raw_col.max()
-                if col_max > col_min:
-                    normalized_df[f"{col}_norm"] = (raw_col - col_min) / (col_max - col_min)
-                else:
-                    normalized_df[f"{col}_norm"] = 0.0
-
-        # 2. 역방향 지표 (작을수록 좋은 지표)
-        smaller_is_better = [
-            '공항거리', '항만거리', '고속도로거리', '화물역거리', '환경오염물질_배출사업장수'
-        ]
-        for col in smaller_is_better:
-            if col in df_raw.columns:
-                raw_col = pd.to_numeric(df_raw[col], errors='coerce').fillna(0.0)
-                col_min = raw_col.min()
-                col_max = raw_col.max()
-                if col_max > col_min:
-                    normalized_df[f"{col}_norm"] = 1.0 - (raw_col - col_min) / (col_max - col_min)
-                else:
-                    normalized_df[f"{col}_norm"] = 0.0
+        # 정규화 데이터 탐색 및 로드
+        norm_path = None
+        for f in os.listdir(data_dir):
+            if "정규화" in f:
+                norm_path = os.path.join(data_dir, f)
+                break
+        if norm_path and os.path.exists(norm_path):
+            try:
+                normalized_df = pd.read_csv(norm_path, encoding="utf-8")
+            except Exception:
+                normalized_df = pd.read_csv(norm_path, encoding="cp949")
+                
+        # 통합(위치) 데이터 탐색 및 로드
+        integrated_path = None
+        for f in os.listdir(data_dir):
+            if "통합" in f:
+                integrated_path = os.path.join(data_dir, f)
+                break
+        if integrated_path and os.path.exists(integrated_path):
+            try:
+                location_df = pd.read_csv(integrated_path, encoding="cp949")
+            except Exception:
+                location_df = pd.read_csv(integrated_path, encoding="utf-8")
 
     return normalized_df, location_df
 
