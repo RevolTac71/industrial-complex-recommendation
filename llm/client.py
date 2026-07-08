@@ -37,7 +37,10 @@ class GeminiLLMClient:
     """
     
     def __init__(self):
+        import streamlit as st
         self.api_key = os.getenv("GEMINI_API_KEY")
+        if not self.api_key and "GEMINI_API_KEY" in st.secrets:
+            self.api_key = st.secrets["GEMINI_API_KEY"]
         self.is_configured = False
         
         if self.api_key:
