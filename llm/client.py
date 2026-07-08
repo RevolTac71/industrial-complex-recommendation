@@ -39,13 +39,20 @@ class GeminiLLMClient:
     def __init__(self):
         import streamlit as st
         self.api_key_source = "None"
-        # 오직 Streamlit secrets에서만 가져오도록 고정
+        # 오직 Streamlit secrets에서만 가져오도록 고정 (공백 문자 제거 포함)
         if "GEMINI_API_KEY" in st.secrets and st.secrets["GEMINI_API_KEY"]:
-            self.api_key = st.secrets["GEMINI_API_KEY"]
+            self.api_key = st.secrets["GEMINI_API_KEY"].strip()
             self.api_key_source = "Streamlit Secrets Only"
         else:
             self.api_key = None
             self.api_key_source = "Not Found in Secrets"
+            
+        # Streamlit secrets에서 사용할 Gemini 모델명을 설정 가능하도록 함 (기본값은 안정적인 gemini-1.5-flash로 수정)
+        if "GEMINI_MODEL" in st.secrets and st.secrets["GEMINI_MODEL"]:
+            self.model_name = st.secrets["GEMINI_MODEL"].strip()
+        else:
+            self.model_name = "gemini-1.5-flash"
+            
         self.is_configured = False
         
         if self.api_key:
@@ -80,7 +87,7 @@ class GeminiLLMClient:
         try:
             # 1단계: Google Search Grounding을 통해 실재하는 기사/논문 출처 수집 (토큰 최적화용 단문 요약)
             search_model = genai.GenerativeModel(
-                model_name="gemini-3.1-flash-lite",
+                model_name=self.model_name,
                 tools=[{"google_search_retrieval": {}}]
             )
             search_prompt = (
@@ -93,7 +100,7 @@ class GeminiLLMClient:
 
             # 2단계: 수집된 실재 기사/논문 링크 정보를 컨텍스트로 주입하여 최종 가중치 JSON 구조화 출력 생성
             struct_model = genai.GenerativeModel(
-                model_name="gemini-3.1-flash-lite",
+                model_name=self.model_name,
                 generation_config={
                     "response_mime_type": "application/json",
                     "response_schema": WeightRecommendation,
@@ -125,7 +132,7 @@ class GeminiLLMClient:
             
         try:
             model = genai.GenerativeModel(
-                model_name="gemini-3.1-flash-lite",
+                model_name=self.model_name,
                 generation_config={
                     "response_mime_type": "application/json",
                     "response_schema": TopComplexesResponse,

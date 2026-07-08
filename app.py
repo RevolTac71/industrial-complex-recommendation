@@ -109,6 +109,7 @@ st.sidebar.header("💬 가중치 추천 챗봇")
 if hasattr(llm_client, "api_key") and llm_client.api_key:
     masked_key = llm_client.get_masked_api_key()
     st.sidebar.caption(f"🔑 **API Key**: `{masked_key}` ({llm_client.api_key_source})")
+    st.sidebar.caption(f"🤖 **Model**: `{llm_client.model_name}`")
 else:
     st.sidebar.caption("🔑 **API Key**: `미설정` (API 호출 불가)")
 
