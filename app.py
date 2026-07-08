@@ -249,7 +249,6 @@ for k in keys:
             label=k,
             min_value=0.0,
             max_value=100.0,
-            value=st.session_state[f"slider_{k}"],  # 명시적으로 세션 상태의 값을 바인딩하여 롤백 방지
             key=f"slider_{k}",
             on_change=update_weights,
             args=(k, "slider"),
@@ -261,7 +260,6 @@ for k in keys:
             label=k,
             min_value=0.0,
             max_value=100.0,
-            value=st.session_state[f"num_{k}"],  # 명시적으로 세션 상태의 값을 바인딩하여 롤백 방지
             key=f"num_{k}",
             on_change=update_weights,
             args=(k, "num"),
