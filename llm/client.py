@@ -59,7 +59,7 @@ class GeminiLLMClient:
             # 1단계: Google Search Grounding을 통해 실재하는 기사/논문 출처 수집 (토큰 최적화용 단문 요약)
             search_model = genai.GenerativeModel(
                 model_name="gemini-3.1-flash-lite",
-                tools="google_search"
+                tools=[{"google_search_retrieval": {}}]
             )
             search_prompt = (
                 f"사용자의 산업단지 입지 요구사항인 '{user_input}'과 관련된 국내외 입지 기준, 정부 정책 뉴스 기사, "
