@@ -47,10 +47,14 @@ class GeminiLLMClient:
             self.api_key = None
             self.api_key_source = "Not Found in Secrets"
             
+        # Streamlit secrets에서 사용할 Gemini 모델명을 설정 가능하도록 함 (기본값은 gemini-3.1-flash-lite)
         if "GEMINI_MODEL" in st.secrets and st.secrets["GEMINI_MODEL"]:
             self.model_name = st.secrets["GEMINI_MODEL"].strip()
         else:
             self.model_name = "gemini-3.1-flash-lite"
+            
+        # 한도 초과(429, Quota Exceeded) 발생 시 자동으로 폴백할 이전 세대 안정 모델
+        self.fallback_model_name = "gemini-2.5-flash"
             
         self.is_configured = False
         
@@ -79,81 +83,127 @@ class GeminiLLMClient:
         """
         사용자의 요구사항을 바탕으로 구글 검색(Grounding)을 돌려 
         실제 뉴스 기사나 논문 출처 링크를 포함한 가중치 결과를 반환합니다.
+        기본 모델 한도 초과 시 gemini-2.5-flash 모델로 자동 폴백 재시도합니다.
         """
         if not self.is_configured:
             raise ValueError("GEMINI_API_KEY가 설정되어 있지 않거나 설정에 실패했습니다.")
             
         try:
-            # 1단계: Google Search Grounding을 통해 실재하는 기사/논문 출처 수집 (토큰 최적화용 단문 요약)
-            # 구형 SDK 버전 한계로 인해 최신 모델에서 검색 툴을 쓰면 필드 오류가 나거나 API 400 에러가 날 수 있으므로
-            # 예외 처리를 감싸 검색 실패 시에도 전체 기능이 중단되지 않고 일반 추론으로 동작하게 만듭니다.
-            search_grounding = "관련 논거 기사를 찾지 못했습니다."
-            if "1.5" in self.model_name:
-                try:
-                    search_model = genai.GenerativeModel(
-                        model_name=self.model_name,
-                        tools=[{"google_search_retrieval": {}}]
-                    )
-                    search_prompt = (
-                        f"사용자의 산업단지 입지 요구사항인 '{user_input}'과 관련된 국내외 입지 기준, 정부 정책 뉴스 기사, "
-                        "또는 학술 연구 자료를 구글에서 찾은 뒤, 가장 대표성 있는 기사/논문의 [제목](URL 링크) 1~2개와 핵심 논거를 "
-                        "최대 150자 내외로 매우 압축하여 한글로 기술해 주세요."
-                    )
-                    search_response = search_model.generate_content(search_prompt)
-                    if search_response and search_response.text:
-                        search_grounding = search_response.text
-                except Exception as e:
-                    logging.warning(f"Google Search Grounding 비활성화 혹은 실패 (일반 LLM 추론으로 폴백): {e}")
-
-            # 2단계: 수집된 실재 기사/논문 링크 정보를 컨텍스트로 주입하여 최종 가중치 JSON 구조화 출력 생성
-            struct_model = genai.GenerativeModel(
-                model_name=self.model_name,
-                generation_config={
-                    "response_mime_type": "application/json",
-                    "response_schema": WeightRecommendation,
-                    "temperature": 0.2
-                },
-                system_instruction=SYSTEM_INSTRUCTION + f"\n\n[실시간 구글 검색 근거 및 링크]\n{search_grounding}"
-            )
-            
-            prompt = (
-                f"사용자의 요구사항 '{user_input}'을 바탕으로 5대 지표별 가중치(합산 1.0)를 결정하고, "
-                "위 제공된 [실시간 구글 검색 근거 및 링크]의 마크다운 포맷(기사/논문 제목 및 파란색 링크 URL)을 "
-                "반드시 포함하여 추천 사유(reason)를 작성해 주세요."
-            )
-            response = struct_model.generate_content(prompt)
-            
-            result = json.loads(response.text)
-            return result
+            return self._execute_weight_recommendation(user_input, self.model_name)
         except Exception as e:
-            logging.error(f"Gemini 가중치 추천 호출 중 오류 발생: {e}")
-            raise e
+            err_msg = str(e).lower()
+            # 쿼타 초과(429, Quota Exceeded, ResourceExhausted) 감지 시
+            if "429" in err_msg or "quota" in err_msg or "exhausted" in err_msg or "resource_exhausted" in err_msg:
+                logging.warning(f"기본 모델 {self.model_name} 쿼타 초과로 {self.fallback_model_name} 모델로 자동 전환 재시도합니다. 에러: {e}")
+                try:
+                    return self._execute_weight_recommendation(user_input, self.fallback_model_name)
+                except Exception as ex:
+                    logging.error(f"폴백 모델 {self.fallback_model_name} 실행 중에도 오류 발생: {ex}")
+                    raise ex
+            else:
+                raise e
+
+    def _execute_weight_recommendation(self, user_input: str, model_name: str) -> dict:
+        """
+        실제 가중치 추천 요청을 전송하는 핵심 로직.
+        """
+        # 1단계: Google Search Grounding을 통해 실재하는 기사/논문 출처 수집 (토큰 최적화용 단문 요약)
+        # 구형 SDK 버전 한계로 인해 최신 모델에서 검색 툴을 쓰면 필드 오류가 나거나 API 400 에러가 날 수 있으므로
+        # 예외 처리를 감싸 검색 실패 시에도 전체 기능이 중단되지 않고 일반 추론으로 동작하게 만듭니다.
+        search_grounding = "관련 논거 기사를 찾지 못했습니다."
+        if "1.5" in model_name:
+            try:
+                search_model = genai.GenerativeModel(
+                    model_name=model_name,
+                    tools=[{"google_search_retrieval": {}}]
+                )
+                search_prompt = (
+                    f"사용자의 산업단지 입지 요구사항인 '{user_input}'과 관련된 국내외 입지 기준, 정부 정책 뉴스 기사, "
+                    "또는 학술 연구 자료를 구글에서 찾은 뒤, 가장 대표성 있는 기사/논문의 [제목](URL 링크) 1~2개와 핵심 논거를 "
+                    "최대 150자 내외로 매우 압축하여 한글로 기술해 주세요."
+                )
+                search_response = search_model.generate_content(search_prompt)
+                if search_response and search_response.text:
+                    search_grounding = search_response.text
+            except Exception as e:
+                logging.warning(f"Google Search Grounding 비활성화 혹은 실패 (일반 LLM 추론으로 폴백): {e}")
+        else:
+            try:
+                # 최신 3.x/2.x 버전 계열은 google_search 도구를 사용할 수 있으므로 시도
+                search_model = genai.GenerativeModel(
+                    model_name=model_name,
+                    tools=[{"google_search": {}}]
+                )
+                search_prompt = (
+                    f"사용자의 산업단지 입지 요구사항인 '{user_input}'과 관련된 국내외 입지 기준, 정부 정책 뉴스 기사, "
+                    "또는 학술 연구 자료를 구글에서 찾은 뒤, 가장 대표성 있는 기사/논문의 [제목](URL 링크) 1~2개와 핵심 논거를 "
+                    "최대 150자 내외로 매우 압축하여 한글로 기술해 주세요."
+                )
+                search_response = search_model.generate_content(search_prompt)
+                if search_response and search_response.text:
+                    search_grounding = search_response.text
+            except Exception as e:
+                logging.warning(f"최신 모델 검색 툴 연동 실패 혹은 미지원으로 검색 도구 비활성화: {e}")
+
+        # 2단계: 수집된 실재 기사/논문 링크 정보를 컨텍스트로 주입하여 최종 가중치 JSON 구조화 출력 생성
+        struct_model = genai.GenerativeModel(
+            model_name=model_name,
+            generation_config={
+                "response_mime_type": "application/json",
+                "response_schema": WeightRecommendation,
+                "temperature": 0.2
+            },
+            system_instruction=SYSTEM_INSTRUCTION + f"\n\n[실시간 구글 검색 근거 및 링크]\n{search_grounding}"
+        )
+        
+        prompt = (
+            f"사용자의 요구사항 '{user_input}'을 바탕으로 5대 지표별 가중치(합산 1.0)를 결정하고, "
+            "위 제공된 [실시간 구글 검색 근거 및 링크]의 마크다운 포맷(기사/논문 제목 및 파란색 링크 URL)을 "
+            "반드시 포함하여 추천 사유(reason)를 작성해 주세요."
+        )
+        response = struct_model.generate_content(prompt)
+        result = json.loads(response.text)
+        return result
 
     def get_top_complexes_details(self, complexes: list[str]) -> dict:
         """
         상위 5개 산업단지명 리스트에 대한 정보(위도, 경도, 한줄 특성, 상세 특성)를
         구조화된 형태로 받아옵니다.
+        기본 모델 한도 초과 시 gemini-2.5-flash 모델로 자동 폴백 재시도합니다.
         """
         if not self.is_configured:
             raise ValueError("GEMINI_API_KEY가 설정되어 있지 않거나 설정에 실패했습니다.")
             
         try:
-            model = genai.GenerativeModel(
-                model_name=self.model_name,
-                generation_config={
-                    "response_mime_type": "application/json",
-                    "response_schema": TopComplexesResponse,
-                    "temperature": 0.2
-                },
-                system_instruction="당신은 대한민국 부울경(부산, 울산, 경상남도) 지역의 산업단지 분석 전문가입니다. 주어진 산업단지들의 정확한 지리적 위치(위도, 경도)를 파악하고, 각 산업단지의 고유 특성, 장점, 주력 산업군, 물류 여건 등을 분석하여 요약 정보와 상세 정보를 구조화된 JSON으로 반환해 주세요."
-            )
-            
-            prompt = f"다음 산업단지들의 지리적 위도/경도 좌표 및 주요 특성을 분석해 주세요:\n{', '.join(complexes)}"
-            response = model.generate_content(prompt)
-            
-            result = json.loads(response.text)
-            return result
+            return self._execute_top_complexes_details(complexes, self.model_name)
         except Exception as e:
-            logging.error(f"산업단지 상세 정보 조회 중 오류 발생: {e}")
-            raise e
+            err_msg = str(e).lower()
+            if "429" in err_msg or "quota" in err_msg or "exhausted" in err_msg or "resource_exhausted" in err_msg:
+                logging.warning(f"기본 모델 {self.model_name} 쿼타 초과로 {self.fallback_model_name} 모델로 자동 전환 재시도합니다. 에러: {e}")
+                try:
+                    return self._execute_top_complexes_details(complexes, self.fallback_model_name)
+                except Exception as ex:
+                    logging.error(f"폴백 모델 {self.fallback_model_name} 실행 중에도 오류 발생: {ex}")
+                    raise ex
+            else:
+                raise e
+
+    def _execute_top_complexes_details(self, complexes: list[str], model_name: str) -> dict:
+        """
+        실제 단지 상세 정보를 요청하는 핵심 로직.
+        """
+        model = genai.GenerativeModel(
+            model_name=model_name,
+            generation_config={
+                "response_mime_type": "application/json",
+                "response_schema": TopComplexesResponse,
+                "temperature": 0.2
+            },
+            system_instruction="당신은 대한민국 부울경(부산, 울산, 경상남도) 지역의 산업단지 분석 전문가입니다. 주어진 산업단지들의 정확한 지리적 위치(위도, 경도)를 파악하고, 각 산업단지의 고유 특성, 장점, 주력 산업군, 물류 여건 등을 분석하여 요약 정보와 상세 정보를 구조화된 JSON으로 반환해 주세요."
+        )
+        
+        prompt = f"다음 산업단지들의 지리적 위도/경도 좌표 및 주요 특성을 분석해 주세요:\n{', '.join(complexes)}"
+        response = model.generate_content(prompt)
+        result = json.loads(response.text)
+        return result
 
