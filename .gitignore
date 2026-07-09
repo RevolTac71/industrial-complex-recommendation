@@ -8,3 +8,6 @@ task.md
 implementation_plan.md
 walkthrough.md
 *.key
+factoryon_crawler.py
+price_layer_debug.html
+factoryon_real_estate_*.csv
