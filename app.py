@@ -393,6 +393,34 @@ with col2:
             st.markdown(f"*{short_desc}*")
             
             with st.expander("더 자세한 상세정보 보기"):
+                # 지하철역 및 버스정류장 개수 (이미 데이터셋에 존재하는 3km 반경 내 개수 데이터) 표기
+                subway_cnt = row.get('subway_count', 0)
+                bus_cnt = row.get('bus_count', 0)
+                
+                import math
+                subway_display = int(subway_cnt) if (pd.notnull(subway_cnt) and not math.isnan(subway_cnt)) else 0
+                bus_display = int(bus_cnt) if (pd.notnull(bus_cnt) and not math.isnan(bus_cnt)) else 0
+                
+                st.markdown("##### 🚇 인근 대중교통 인프라 현황 (3km 반경)")
+                col_sub, col_bus = st.columns(2)
+                with col_sub:
+                    st.markdown(
+                        f"<div style='background-color: #f7f9fc; padding: 10px; border-radius: 6px; border-left: 4px solid #4CAF50;'>"
+                        f"<span style='font-size: 11px; color: #666;'>지하철역 수</span><br>"
+                        f"<strong style='font-size: 15px; color: #2E7D32;'>{subway_display} 개역</strong>"
+                        f"</div>", 
+                        unsafe_allow_html=True
+                    )
+                with col_bus:
+                    st.markdown(
+                        f"<div style='background-color: #f7f9fc; padding: 10px; border-radius: 6px; border-left: 4px solid #FF9800;'>"
+                        f"<span style='font-size: 11px; color: #666;'>버스 정류장 수</span><br>"
+                        f"<strong style='font-size: 15px; color: #E65100;'>{bus_display} 개소</strong>"
+                        f"</div>", 
+                        unsafe_allow_html=True
+                    )
+                st.write("") # 마진 확보
+                
                 detail_desc = detail_info.get('detail_desc', '상세 설명 정보를 불러오지 못했습니다.') if detail_info else '상세 설명 정보를 불러오지 못했습니다.'
                 st.write(detail_desc)
                 
