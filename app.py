@@ -326,20 +326,16 @@ with col1:
                 has_marked = True
                 short_desc = detail_info.get('short_desc', '상세 분석 정보가 로드되었습니다.') if detail_info else '상세 분석 정보가 로드되었습니다.'
                 
-                google_roadview_url = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lon}"
-                google_map_url = f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
-                google_roadview_embed_url = f"https://maps.google.com/maps?q=&layer=c&cbll={lat},{lon}&output=embed"
+                kakao_roadview_url = f"https://map.kakao.com/link/roadview/{lat},{lon}"
+                kakao_map_url = f"https://map.kakao.com/link/map/{dan_name},{lat},{lon}"
                 popup_html = f"""
-                <div style="font-family: Arial; width: 260px; padding: 5px;">
+                <div style="font-family: Arial; width: 220px; padding: 5px;">
                     <h4 style="margin: 0 0 5px 0; color: #1f77b4; font-size: 14px;">🏆 {dan_name} ({rank}위)</h4>
                     <b style="font-size: 12px; color: #2ca02c;">종합 평가 점수: {score}점</b>
                     <p style="font-size: 11px; margin: 5px 0 8px 0; color: #555; line-height: 1.4;"><i>"{short_desc}"</i></p>
-                    <div style="margin-bottom: 8px; border-radius: 4px; overflow: hidden; border: 1px solid #ddd;">
-                        <iframe src="{google_roadview_embed_url}" width="100%" height="150" style="border:0;" allowfullscreen="" loading="lazy"></iframe>
-                    </div>
-                    <div style="display: flex; gap: 5px; justify-content: center;">
-                        <a href="{google_roadview_url}" target="_blank" style="display: inline-block; padding: 4px 8px; background-color: #4285F4; color: white; text-decoration: none; border-radius: 4px; font-size: 10px; font-weight: bold;">🛣️ 큰화면 로드뷰</a>
-                        <a href="{google_map_url}" target="_blank" style="display: inline-block; padding: 4px 8px; background-color: #34A853; color: white; text-decoration: none; border-radius: 4px; font-size: 10px; font-weight: bold;">📍 구글맵 이동</a>
+                    <div style="margin-top: 8px; display: flex; gap: 5px; justify-content: center;">
+                        <a href="{kakao_roadview_url}" target="_blank" style="display: inline-block; padding: 6px 10px; background-color: #FFEB3B; color: #3E2723; text-decoration: none; border-radius: 4px; font-size: 10px; font-weight: bold; border: 1px solid #FBC02D; text-align: center;">🛣️ 카카오 로드뷰</a>
+                        <a href="{kakao_map_url}" target="_blank" style="display: inline-block; padding: 6px 10px; background-color: #FF9800; color: white; text-decoration: none; border-radius: 4px; font-size: 10px; font-weight: bold; text-align: center;">📍 카카오 지도</a>
                     </div>
                 </div>
                 """
@@ -348,7 +344,7 @@ with col1:
                 
                 folium.Marker(
                     location=[lat, lon],
-                    popup=folium.Popup(popup_html, max_width=300),
+                    popup=folium.Popup(popup_html, max_width=250),
                     icon=folium.Icon(color=marker_color, icon="star" if rank <= 3 else "info-sign")
                 ).add_to(candidates_group)
                 
