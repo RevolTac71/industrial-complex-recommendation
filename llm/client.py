@@ -47,13 +47,24 @@ class GeminiLLMClient:
     def __init__(self):
         import streamlit as st
         self.api_key_source = "None"
-        # 오직 Streamlit secrets에서만 가져오도록 고정 (공백 문자 제거 포함)
-        if "GEMINI_API_KEY" in st.secrets and st.secrets["GEMINI_API_KEY"]:
-            self.api_key = st.secrets["GEMINI_API_KEY"].strip()
-            self.api_key_source = "Streamlit Secrets Only"
+        
+        # 1. 시스템 환경 변수 및 .env에서 최우선 로드 시도
+        api_key = os.getenv("GEMINI_API_KEY")
+        if api_key:
+            self.api_key = api_key.strip()
+            self.api_key_source = "Environment Variable / .env"
+        # 2. 없거나 비어있는 경우 st.secrets에서 로드 시도
         else:
-            self.api_key = None
-            self.api_key_source = "Not Found in Secrets"
+            try:
+                if "GEMINI_API_KEY" in st.secrets and st.secrets["GEMINI_API_KEY"]:
+                    self.api_key = st.secrets["GEMINI_API_KEY"].strip()
+                    self.api_key_source = "Streamlit Secrets Only"
+                else:
+                    self.api_key = None
+                    self.api_key_source = "Not Found in Environment or Secrets"
+            except Exception:
+                self.api_key = None
+                self.api_key_source = "Not Found (Streamlit Secrets Error)"
             
         # Streamlit secrets에서 사용할 Gemini 모델명을 설정 가능하도록 함 (기본값은 gemini-3.1-flash-lite)
         if "GEMINI_MODEL" in st.secrets and st.secrets["GEMINI_MODEL"]:
