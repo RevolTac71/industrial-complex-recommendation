@@ -500,43 +500,56 @@ if run_analysis_button and candidate_master is not None and normalized_df is not
             st.session_state.current_weights
         )
         
-        # 2단계: 기업 입주 자격 검증 순차 루프 (5개 채울 때까지 재호출)
-        eligible_complexes = []
-        checked_info_map = {}
-        
-        current_idx = 0
-        max_search_limit = min(30, len(result_gdf))
-        
-        while len(eligible_complexes) < 5 and current_idx < max_search_limit:
-            row = result_gdf.iloc[current_idx]
-            dan_name = row['DAN_NAME']
-            dan_id = str(row['DAN_ID'])
-            
-            # 브이월드 API 호출
-            allowed_industries = get_vworld_allowed_industries(dan_name)
-            
-            # LLM 자격 검증 호출
-            eligibility = llm_client.check_industry_eligibility(dan_name, user_business, allowed_industries)
-            status = eligibility.get("status", "불가")
-            
-            checked_info_map[dan_id] = {
-                "status": status,
-                "matched": eligibility.get("matched_industry", "N/A"),
-                "analysis": eligibility.get("analysis", "")
-            }
-            
-            if status in ["가능", "조건부 가능"]:
-                eligible_complexes.append(row)
-                
-            current_idx += 1
-            
-        # 통과된 단지들로 top_5 구성 (만약 부족할 경우 대비해 폴백 장치 마련)
-        if eligible_complexes:
-            top_5_complexes = pd.DataFrame(eligible_complexes).head(5)
-        else:
-            top_5_complexes = result_gdf.head(5)
-            
+        # 2단계: 기업 입주 자격 검증 (상위 5개 단지에 대해 VWorld 조회 후 LLM 일괄 1회 호출)
+        top_5_complexes = result_gdf.head(5).copy()
         top_5_names = top_5_complexes['DAN_NAME'].tolist()
+        
+        # 1) 각 단지별 브이월드 유치업종 데이터 수집 (HTTP Get)
+        complexes_list = []
+        for _, row in top_5_complexes.iterrows():
+            dan_name = row['DAN_NAME']
+            allowed = get_vworld_allowed_industries(dan_name)
+            complexes_list.append({
+                "dan_name": dan_name,
+                "dan_id": str(row['DAN_ID']),
+                "allowed_industries": allowed
+            })
+            
+        # 2) LLM 1회 호출하여 5개 단지 일괄 판정 수행 (Quota 429 우회)
+        eligibility_response = llm_client.check_multiple_complexes_eligibility(complexes_list, user_business)
+        results_list = eligibility_response.get("results", [])
+        
+        # 3) 판정 결과를 checked_info_map으로 변환
+        checked_info_map = {}
+        for res in results_list:
+            res_name = res.get("dan_name", "")
+            status = res.get("status", "불가")
+            matched = res.get("matched_industry", "N/A")
+            analysis = res.get("analysis", "")
+            
+            # dan_name 매칭하여 dan_id 식별
+            matching_id = None
+            for comp in complexes_list:
+                if comp["dan_name"] == res_name:
+                    matching_id = comp["dan_id"]
+                    break
+            
+            if matching_id:
+                checked_info_map[matching_id] = {
+                    "status": status,
+                    "matched": matched,
+                    "analysis": analysis
+                }
+                
+        # 미정의 단지 기본값 안전 처리
+        for comp in complexes_list:
+            c_id = comp["dan_id"]
+            if c_id not in checked_info_map:
+                checked_info_map[c_id] = {
+                    "status": "조건부 가능",
+                    "matched": "N/A",
+                    "analysis": "AI 일괄 심사 응답 유실로 인한 기본 판정입니다."
+                }
         
         # 전체 result_gdf 데이터프레임에도 자격 정보 기입하여 테이블 노출 가능하도록 함
         result_gdf['입주자격'] = '미검증'

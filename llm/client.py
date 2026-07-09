@@ -270,35 +270,54 @@ class GeminiLLMClient:
         result = json.loads(response.text)
         return result
 
-    def check_industry_eligibility(self, complex_name: str, user_business_description: str, allowed_industries: list) -> dict:
+    def check_multiple_complexes_eligibility(self, complexes_list: list[dict], user_business_description: str) -> dict:
         """
-        사용자의 사업 설명과 브이월드 API에서 조회한 허용 업종 목록을 바탕으로
-        입주 자격 판정(가능/조건부 가능/불가)을 AI 에이전트로 판정하여 구조화된 JSON으로 반환합니다.
+        제시된 복수의 산업단지(각 이름과 허용 업종 목록)에 대하여,
+        Gemini 1회 호출(배치 처리)로 입주 자격 판정(가능/조건부 가능/불가)을 심사하여 결과를 반환합니다.
         """
         if not self.is_configured:
-            # 한국어 주석: API 키 누락 시 안전한 폴백 결과 반환
+            # 한국어 주석: API 키 누락 시 모든 단지에 대해 안전한 기본값 반환
             return {
-                "status": "조건부 가능",
-                "matched_industry": "확인 불가 (API 키 누락)",
-                "analysis": "Gemini API 키가 설정되지 않아 자격 검증을 진행할 수 없습니다. 관할 지자체에 별도 문의가 필요합니다."
+                "results": [
+                    {
+                        "dan_name": comp.get("dan_name", ""),
+                        "status": "조건부 가능",
+                        "matched_industry": "확인 불가 (API 키 누락)",
+                        "analysis": "Gemini API 키가 설정되지 않아 자격 심사를 진행할 수 없습니다. 개별 확인이 필요합니다."
+                    } for comp in complexes_list
+                ]
             }
 
-        if not allowed_industries:
-            industries_context = "브이월드 API 조회 결과 허용 업종 정보 없음 (데이터 누락 또는 조회 실패)"
-        else:
-            industries_context = "\n".join([
-                f"- 업종명: {ind.get('induty_nm')} (대분류: {ind.get('category_nm', '제조업')})"
-                for ind in allowed_industries
-            ])
+        # COMPLEXES CONTEXT 구성
+        complexes_context_parts = []
+        for comp in complexes_list:
+            name = comp.get("dan_name", "")
+            allowed = comp.get("allowed_industries", [])
+            if not allowed:
+                industries_text = "브이월드 API 조회 결과 허용 업종 정보 없음 (데이터 누락)"
+            else:
+                industries_text = ", ".join([
+                    f"{ind.get('induty_nm')}({ind.get('category_nm', '제조업')})"
+                    for ind in allowed
+                ])
+            complexes_context_parts.append(
+                f"### 산업단지명: {name}\n- 허용 유치업종 목록: {industries_text}\n"
+            )
+        complexes_context = "\n".join(complexes_context_parts)
 
-        class EligibilityResult(BaseModel):
+        class SingleEligibility(BaseModel):
+            dan_name: str = Field(description="산업단지 이름")
             status: str = Field(description="판정 결과. 반드시 '가능', '조건부 가능', '불가' 중 하나만 출력할 것.")
-            matched_industry: str = Field(description="허용 업종 목록 중 사용자의 사업 내용과 매칭된 업종명. 적절한 매칭이 없으면 '없음' 혹은 'N/A'.")
+            matched_industry: str = Field(description="허용 업종 목록 중 사용자의 사업 내용과 매칭된 업종명. 없으면 'N/A'.")
             analysis: str = Field(description="판정 근거 요약 (반드시 2~3문장의 간결한 요약형 한글 문장)")
+
+        class MultipleEligibilityResult(BaseModel):
+            results: list[SingleEligibility] = Field(description="각 산업단지별 입주 자격 심사 결과 리스트")
 
         system_inst = (
             "당신은 산업단지 입주 자격 및 법률 행정 심사 에이전트입니다. "
-            "사용자의 사업 설명이 해당 산업단지의 유치 업종 허용 목록에 부합하는지 의미론적 유사도(Semantic Match)를 바탕으로 심사하십시오.\n\n"
+            "주어진 여러 산업단지 각각의 유치 업종 허용 목록과 사용자의 사업 설명을 대비하여, "
+            "각 단지별로 입주 자격 적합성을 의미론적 유사도(Semantic Match)를 바탕으로 엄격히 심사하십시오.\n\n"
             "**[판정 기준 규칙]**\n"
             "1. 가능: 사용자의 사업 설명이 허용 업종 목록 중 하나와 의미론적으로 일치하거나 유사하며, 환경오염 요인이 전혀 없는 경우.\n"
             "2. 조건부 가능 (지자체 환경 협의 필요):\n"
@@ -313,17 +332,16 @@ class GeminiLLMClient:
                 model_name=self.model_name,
                 generation_config={
                     "response_mime_type": "application/json",
-                    "response_schema": EligibilityResult,
+                    "response_schema": MultipleEligibilityResult,
                     "temperature": 0.1
                 },
                 system_instruction=system_inst
             )
             
             prompt = (
-                f"산업단지명: {complex_name}\n"
                 f"사용자 사업 설명: {user_business_description}\n\n"
-                f"브이월드 허용 업종 목록:\n{industries_context}\n\n"
-                "위 정보를 바탕으로 입주 자격 심사를 진행하고, 반드시 정의된 JSON 스키마 구조로만 결과를 반환하십시오."
+                f"대상 산업단지 목록 정보:\n{complexes_context}\n\n"
+                "위 정보를 토대로 제시된 모든 산업단지 각각에 대한 입주 적합성을 심사한 후 정의된 JSON 스키마로 응답해 주세요."
             )
             
             try:
@@ -336,7 +354,7 @@ class GeminiLLMClient:
                         model_name=self.fallback_model_name,
                         generation_config={
                             "response_mime_type": "application/json",
-                            "response_schema": EligibilityResult,
+                            "response_schema": MultipleEligibilityResult,
                             "temperature": 0.1
                         },
                         system_instruction=system_inst
@@ -346,10 +364,16 @@ class GeminiLLMClient:
                 else:
                     raise e
         except Exception as e:
+            # 오류 발생 시 폴백 반환
             return {
-                "status": "조건부 가능",
-                "matched_industry": "N/A",
-                "analysis": f"AI 분석 중 오류가 발생했습니다: {str(e)}. 안전을 위해 조건부 가능으로 판정합니다."
+                "results": [
+                    {
+                        "dan_name": comp.get("dan_name", ""),
+                        "status": "조건부 가능",
+                        "matched_industry": "N/A",
+                        "analysis": f"AI 분석 진행 중 예외가 발생했습니다: {str(e)}. 안전을 위해 조건부 가능으로 판정합니다."
+                    } for comp in complexes_list
+                ]
             }
 
 
