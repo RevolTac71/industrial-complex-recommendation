@@ -115,7 +115,7 @@ class GeminiLLMClient:
         try:
             search_model = genai.GenerativeModel(
                 model_name=model_name,
-                tools=[{"google_search": {}}]
+                tools=["google_search"]
             )
             search_prompt = (
                 f"사용자의 산업단지 입지 요구사항인 '{user_input}'과 관련된 국내외 입지 기준, 정부 정책 뉴스 기사, "
@@ -197,7 +197,7 @@ class GeminiLLMClient:
             try:
                 search_model = genai.GenerativeModel(
                     model_name=model_name,
-                    tools=[{"google_search": {}}]
+                    tools=["google_search"]
                 )
                 search_prompt = (
                     f"대한민국 {sigungu} {dan_name} 산업단지 및 그 인근 지역({dong_hints if dong_hints else '인접 법정동/읍면동'})의 최근 부동산 실거래가, "

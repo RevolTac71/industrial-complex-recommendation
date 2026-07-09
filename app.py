@@ -219,7 +219,7 @@ else:
 
 run_analysis_button = False
 if candidate_master is not None:
-    if st.sidebar.button("⚙️ 추천 입지 분석 실행", use_container_width=True):
+    if st.sidebar.button("⚙️ 추천 입지 분석 실행", width="stretch"):
         run_analysis_button = True
 
 
@@ -458,7 +458,7 @@ with col2:
             '산업혁신여건_점수', '생활정주여건_점수', '근로자이동여건_점수'
         ]
         valid_display_cols = [c for c in display_cols if c in output_df.columns]
-        st.dataframe(output_df[valid_display_cols].sort_values(by="rank"), use_container_width=True)
+        st.dataframe(output_df[valid_display_cols].sort_values(by="rank"), width="stretch")
         
     else:
         st.info("사이드바의 '추천 입지 분석 실행' 버튼을 누르시면 분석 결과 랭킹 테이블이 표시됩니다.")
