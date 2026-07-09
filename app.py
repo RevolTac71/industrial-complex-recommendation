@@ -12,10 +12,22 @@ import glob
 from sqlalchemy import create_engine
 
 from llm.client import GeminiLLMClient
+from llm.factory_api import get_nearest_transit
 from analysis.default_pipeline import DefaultSpatialPipeline
 
 # EPSG:5174(보정 중부원점) -> EPSG:4326(WGS84 위경도) 좌표 변환 transformer 초기화
 transformer = Transformer.from_crs("epsg:5174", "epsg:4326", always_xy=True)
+
+# 5대 추천 산단 DAN_ID → 중심 위경도 매핑 테이블 (대중교통 거리 계산용)
+DAN_COORD_MAP = {
+    "326050": (35.2398, 128.9990),   # 금곡
+    "226040": (35.1690, 129.1281),   # 센텀시티
+    "226030": (35.1056, 128.9802),   # 신평·장림
+    "226031": (35.1056, 128.9802),   # 신평.장림(기존)
+    "226032": (35.1056, 128.9802),   # 신평.장림(협업)
+    "326010": (35.2066, 129.1118),   # 회동·석대
+    "248850": (35.2417, 128.8508),   # 서김해
+}
 
 def transform_coords(x, y):
     try:
@@ -499,9 +511,27 @@ with col2:
             st.markdown(f"*{short_desc}*")
             
             with st.expander("더 자세한 상세정보 보기"):
-                # 지하철역 및 버스정류장 최단거리 정보 표기 (LLM 추론 결과 데이터 바인딩)
-                subway_dist = detail_info.get('subway_distance', '정보 없음') if detail_info else '정보 없음'
-                bus_dist = detail_info.get('bus_distance', '정보 없음') if detail_info else '정보 없음'
+                # DB에서 직접 산업단지 좌표 기준 최단 대중교통 거리 실측값 조회
+                row_lat, row_lon = None, None
+                # 1) location_df에 lat/lon 컬럼이 있으면 그것을 사용
+                if location_df is not None and 'lat' in (location_df.columns if hasattr(location_df, 'columns') else []):
+                    loc_match = location_df[location_df['DAN_ID'].astype(str) == dan_id]
+                    if not loc_match.empty:
+                        row_lat = float(loc_match.iloc[0]['lat'])
+                        row_lon = float(loc_match.iloc[0]['lon'])
+                # 2) 없으면 DAN_COORD_MAP 매핑 테이블 사용 (5대 산단 하드코딩)
+                if row_lat is None:
+                    coords = DAN_COORD_MAP.get(dan_id)
+                    if coords:
+                        row_lat, row_lon = coords
+
+                if row_lat and row_lon:
+                    transit_data = get_nearest_transit(row_lat, row_lon)
+                    subway_dist = transit_data.get('subway_text', '정보 없음')
+                    bus_dist = transit_data.get('bus_text', '정보 없음')
+                else:
+                    subway_dist = '좌표 데이터 없음'
+                    bus_dist = '좌표 데이터 없음'
                 
                 st.markdown("##### 🚇 가장 가까운 대중교통 연계 정보")
                 col_sub, col_bus = st.columns(2)
