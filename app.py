@@ -51,55 +51,13 @@ def normalize_name(name):
 
 # 2. 상호 반응형 가중치 슬라이더 및 숫자 입력 동기화 콜백 함수 정의
 def update_weights(changed_key, widget_type):
+    # 한국어 주석: 슬라이더와 숫자 입력 칸 간의 양방향 동기화만 처리하고, 다른 지표를 자동으로 깎는 로직은 삭제합니다.
     new_val = st.session_state[f"{widget_type}_{changed_key}"]
-    old_val = st.session_state.current_weights[changed_key]
-    diff = new_val - old_val
-    
-    if diff == 0:
-        return
-        
     st.session_state.current_weights[changed_key] = new_val
-    other_keys = [k for k in keys if k != changed_key]
     
-    if diff > 0:
-        remaining_to_deduct = diff
-        while remaining_to_deduct > 0.001:
-            available_keys = [k for k in other_keys if st.session_state.current_weights[k] > 0]
-            if not available_keys:
-                break
-            
-            share = remaining_to_deduct / len(available_keys)
-            actually_deducted = 0.0
-            
-            for k in available_keys:
-                current = st.session_state.current_weights[k]
-                deduction = min(share, current)
-                st.session_state.current_weights[k] = round(current - deduction, 2)
-                actually_deducted += deduction
-                
-            remaining_to_deduct -= actually_deducted
-            
-    elif diff < 0:
-        remaining_to_add = -diff
-        while remaining_to_add > 0.001:
-            available_keys = [k for k in other_keys if st.session_state.current_weights[k] < 100]
-            if not available_keys:
-                break
-                
-            share = remaining_to_add / len(available_keys)
-            actually_added = 0.0
-            
-            for k in available_keys:
-                current = st.session_state.current_weights[k]
-                addition = min(share, 100.0 - current)
-                st.session_state.current_weights[k] = round(current + addition, 2)
-                actually_added += addition
-                
-            remaining_to_add -= actually_added
-
-    for k in keys:
-        st.session_state[f"slider_{k}"] = st.session_state.current_weights[k]
-        st.session_state[f"num_{k}"] = st.session_state.current_weights[k]
+    # 동일 지표의 다른 입력 위젯을 동기화합니다.
+    other_widget_type = "num" if widget_type == "slider" else "slider"
+    st.session_state[f"{other_widget_type}_{changed_key}"] = new_val
 
 
 # ==================== 사이드바: LLM 챗봇 및 가중치 조정 ====================
@@ -248,6 +206,17 @@ for k in keys:
 
 st.session_state.current_weights = {k: st.session_state[f"slider_{k}"] for k in keys}
 
+# 한국어 주석: 현재 배정된 가중치 총합을 계산하고, 총합 정보 및 100점 초과 시 경고 메시지를 표시합니다.
+total_weight = sum(st.session_state.current_weights.values())
+
+st.sidebar.markdown(f"**현재 배정된 총점: {total_weight:.1f} / 100.0점**")
+if total_weight > 100.0:
+    st.sidebar.warning(f"⚠️ 총합이 100점을 초과했습니다! (현재 {total_weight:.1f}점)")
+elif total_weight == 100.0:
+    st.sidebar.success(f"✅ 총합 100점 충족")
+else:
+    st.sidebar.info(f"💡 총합이 100점 미만입니다. (현재 {total_weight:.1f}점)")
+
 run_analysis_button = False
 if candidate_master is not None:
     if st.sidebar.button("⚙️ 추천 입지 분석 실행", use_container_width=True):
@@ -352,11 +321,17 @@ with col1:
                 has_marked = True
                 short_desc = detail_info.get('short_desc', '상세 분석 정보가 로드되었습니다.') if detail_info else '상세 분석 정보가 로드되었습니다.'
                 
+                google_roadview_url = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lon}"
+                google_map_url = f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
                 popup_html = f"""
                 <div style="font-family: Arial; width: 220px; padding: 5px;">
                     <h4 style="margin: 0 0 5px 0; color: #1f77b4; font-size: 14px;">🏆 {dan_name} ({rank}위)</h4>
                     <b style="font-size: 12px; color: #2ca02c;">종합 평가 점수: {score}점</b>
                     <p style="font-size: 11px; margin: 5px 0 0 0; color: #555; line-height: 1.4;"><i>"{short_desc}"</i></p>
+                    <div style="margin-top: 8px; display: flex; gap: 5px; justify-content: center;">
+                        <a href="{google_roadview_url}" target="_blank" style="display: inline-block; padding: 4px 8px; background-color: #4285F4; color: white; text-decoration: none; border-radius: 4px; font-size: 10px; font-weight: bold;">🛣️ 로드뷰</a>
+                        <a href="{google_map_url}" target="_blank" style="display: inline-block; padding: 4px 8px; background-color: #34A853; color: white; text-decoration: none; border-radius: 4px; font-size: 10px; font-weight: bold;">📍 구글맵</a>
+                    </div>
                 </div>
                 """
                 
@@ -415,6 +390,19 @@ with col2:
             with st.expander("더 자세한 상세정보 보기"):
                 detail_desc = detail_info.get('detail_desc', '상세 설명 정보를 불러오지 못했습니다.') if detail_info else '상세 설명 정보를 불러오지 못했습니다.'
                 st.write(detail_desc)
+                
+                if detail_info:
+                    price_per_pyeong = detail_info.get('price_per_pyeong', '정보 없음')
+                    recent_transaction_info = detail_info.get('recent_transaction_info', '정보 없음')
+                    
+                    st.markdown("---")
+                    st.markdown("##### 💰 FactoryON 실거래가 및 평당 시세 분석")
+                    col_p1, col_p2 = st.columns([1, 2])
+                    with col_p1:
+                        st.metric(label="평당 실거래 시세", value=price_per_pyeong)
+                    with col_p2:
+                        st.markdown(f"**최근 실거래 요약**\n\n{recent_transaction_info}")
+                    st.markdown("---")
                 
                 score_df = pd.DataFrame({
                     "평가 지표": ["🏭 지역여건", "🚚 물류여건", "💡 산업혁신여건", "🏡 생활정주여건", "🚶 근로자이동여건"],
