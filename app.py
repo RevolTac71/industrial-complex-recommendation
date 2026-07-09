@@ -537,32 +537,45 @@ if run_analysis_button and candidate_master is not None and normalized_df is not
                     break
             
             if matching_id:
+                # complexes_list에서 허용업종 원본 목록 추출
+                raw_allowed_list = []
+                for comp in complexes_list:
+                    if comp["dan_id"] == matching_id:
+                        raw_allowed = comp.get("allowed_industries", [])
+                        raw_allowed_list = [f"{ind.get('induty_nm')}({ind.get('category_nm', '제조업')})" for ind in raw_allowed]
+                        break
                 checked_info_map[matching_id] = {
                     "status": status,
                     "matched": matched,
-                    "analysis": analysis
+                    "analysis": analysis,
+                    "raw_allowed": ", ".join(raw_allowed_list) if raw_allowed_list else "고시 정보 없음 (제조업 입주 협의 필요)"
                 }
                 
         # 미정의 단지 기본값 안전 처리
         for comp in complexes_list:
             c_id = comp["dan_id"]
             if c_id not in checked_info_map:
+                raw_allowed = comp.get("allowed_industries", [])
+                raw_allowed_list = [f"{ind.get('induty_nm')}({ind.get('category_nm', '제조업')})" for ind in raw_allowed]
                 checked_info_map[c_id] = {
                     "status": "조건부 가능",
                     "matched": "N/A",
-                    "analysis": "AI 일괄 심사 응답 유실로 인한 기본 판정입니다."
+                    "analysis": "AI 일괄 심사 응답 유실로 인한 기본 판정입니다.",
+                    "raw_allowed": ", ".join(raw_allowed_list) if raw_allowed_list else "고시 정보 없음 (제조업 입주 협의 필요)"
                 }
         
         # 전체 result_gdf 데이터프레임에도 자격 정보 기입하여 테이블 노출 가능하도록 함
         result_gdf['입주자격'] = '미검증'
         result_gdf['매칭업종'] = 'N/A'
         result_gdf['판정근거'] = '분석 미수행 (상위 5대 추천 외)'
+        result_gdf['허용업종목록'] = '미검증'
         
         for d_id, info in checked_info_map.items():
             mask = result_gdf['DAN_ID'].astype(str) == d_id
             result_gdf.loc[mask, '입주자격'] = info['status']
             result_gdf.loc[mask, '매칭업종'] = info['matched']
             result_gdf.loc[mask, '판정근거'] = info['analysis']
+            result_gdf.loc[mask, '허용업종목록'] = info.get('raw_allowed', '정보 없음')
             
         st.session_state.result_gdf = result_gdf
         st.session_state.checked_info_map = checked_info_map
@@ -821,6 +834,10 @@ with col2:
                 # 한국어 주석: AI 입주 자격 심사 보고서 노출
                 st.markdown("##### 🤖 AI 입주 자격 심사 보고서")
                 st.info(elig_analysis)
+                
+                # 브이월드 허용 업종 목록 표기
+                elig_raw = row.get('허용업종목록', '정보 없음')
+                st.markdown(f"**🏭 브이월드 고시 허용 유치업종:**\n> {elig_raw}")
                 st.write("")
                 
                 # 한국어 주석: 공통 함수를 사용하여 4단계 우선순위로 정확한 좌표 조회
