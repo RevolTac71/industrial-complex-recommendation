@@ -18,6 +18,95 @@ from analysis.default_pipeline import DefaultSpatialPipeline
 # EPSG:5174(보정 중부원점) -> EPSG:4326(WGS84 위경도) 좌표 변환 transformer 초기화
 transformer = Transformer.from_crs("epsg:5174", "epsg:4326", always_xy=True)
 
+def get_vworld_allowed_industries(complex_name: str) -> list:
+    """
+    사용자가 선택한 산업단지 이름(complex_name)을 기반으로 브이월드 데이터 API를 호출하여
+    허용 유치업종 목록을 반환합니다.
+    """
+    import requests
+    
+    api_key = os.getenv("VWORLD_API_KEY", "D85A9D58-AD9A-378F-A6E6-F7AD0E79F4A1")
+    url = "https://api.vworld.kr/req/data"
+    
+    # 1. 산업단지명 핵심 키워드 정제
+    clean_name = complex_name
+    for word in ["일반산업단지", "국가산업단지", "농공단지", "산업단지", "일반산단", "국가산단", "산단", "특별", "전문"]:
+        clean_name = clean_name.replace(word, "")
+    clean_name = clean_name.strip()
+    
+    search_candidates = [clean_name]
+    
+    # 특수문자 분할 후보 추가 (예: 신평·장림 -> 신평)
+    for char in ["·", ".", "-", "/"]:
+        if char in clean_name:
+            parts = [p.strip() for p in clean_name.split(char) if p.strip()]
+            if parts:
+                search_candidates.append(parts[0])
+                
+    # normalize_name 결과 추가
+    norm_name = clean_name
+    for char in [" ", "·", ".", "-", "(", ")"]:
+        norm_name = norm_name.replace(char, "")
+    if norm_name and norm_name not in search_candidates:
+        search_candidates.append(norm_name)
+        
+    # 첫 2~3글자 추가
+    if len(clean_name) >= 2:
+        search_candidates.append(clean_name[:2])
+        search_candidates.append(clean_name[:3])
+        
+    # 중복 제거
+    seen = set()
+    search_queries = []
+    for q in search_candidates:
+        if q and q not in seen:
+            seen.add(q)
+            search_queries.append(q)
+            
+    features = []
+    for query in search_queries:
+        try:
+            params = {
+                "key": api_key,
+                "domain": "http://localhost",
+                "service": "data",
+                "version": "2.0",
+                "request": "GetFeature",
+                "data": "LT_C_DAMYUCH",
+                "format": "json",
+                "size": 100,
+                "geomFilter": "BOX(124.0, 33.0, 132.0, 39.0)",  # 남한 전체 BOX로 우회
+                "attrFilter": f"dan_name:like:{query}"
+            }
+            response = requests.get(url, params=params, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                if "response" in data and data["response"].get("status") == "OK":
+                    features = data["response"]["result"]["featureCollection"].get("features", [])
+                    if features:
+                        break
+        except Exception:
+            # 예외 처리: 다음 검색 후보 시도
+            pass
+            
+    allowed_industries = []
+    seen_industries = set()
+    for feat in features:
+        props = feat.get("properties", {})
+        upj_name = props.get("upj_name")
+        cat_nam = props.get("cat_nam")
+        if upj_name:
+            val = (upj_name, cat_nam)
+            if val not in seen_industries:
+                seen_industries.add(val)
+                allowed_industries.append({
+                    "induty_code": "N/A",
+                    "induty_nm": upj_name,
+                    "category_nm": cat_nam if cat_nam else "제조업"
+                })
+                
+    return allowed_industries
+
 # 한국어 주석: DAN_COORD_MAP은 하드코딩 백업값으로 초기화합니다.
 # 앱 시작 시 load_data()가 NeonDB의 dan_coords 테이블을 로드하여 이 맵을 갱신합니다.
 DAN_COORD_MAP = {
@@ -223,6 +312,15 @@ if "recommendation_reason" in st.session_state and st.session_state.recommendati
 
 st.sidebar.write("---")
 
+# 기업 사업 설명 입력 영역 추가
+st.sidebar.subheader("🏭 기업 사업 설명 입력")
+user_business = st.sidebar.text_area(
+    "사용자의 사업 설명 (자연어)", 
+    value="자동차용 기계 부품 및 금속 가공 제조업",
+    height=100,
+    help="입력한 사업에 대해 브이월드 유치업종 API와 AI 에이전트가 단지별 입주 적합성을 자동 판정합니다."
+)
+
 
 # ==================== 단일 정규화 데이터 로드 (DB 연동) ====================
 @st.cache_data(ttl=600)
@@ -234,6 +332,7 @@ def load_data():
     normalized_df = None
     location_df = None
     coords_df = None  # 한국어 주석: 카카오 API로 수집된 산업단지 WGS84 좌표 테이블
+    productivity_df = None  # 한국어 주석: 예측 생산성 데이터 테이블
 
     if db_url:
         try:
@@ -251,6 +350,12 @@ def load_data():
                 coords_df["DAN_ID"] = coords_df["DAN_ID"].astype(str)
             except Exception:
                 coords_df = None
+            # NeonDB에서 예측 생산성 데이터 로드 (존재하는 경우)
+            try:
+                productivity_df = pd.read_sql("SELECT * FROM dan_productivity", con=engine)
+                productivity_df["DAN_ID"] = productivity_df["DAN_ID"].astype(str)
+            except Exception:
+                productivity_df = None
         except Exception as e:
             st.warning(f"⚠️ DB 연결 실패, 로컬 백업 로드를 시도합니다: {e}")
 
@@ -291,9 +396,20 @@ def load_data():
             except Exception:
                 coords_df = None
 
-    return normalized_df, location_df, coords_df
+        # 한국어 주석: 로컬 fallback 시 industrial_park_productivity_prediction.csv로 보완
+        productivity_path = os.path.join(data_dir, "industrial_park_productivity_prediction.csv")
+        if os.path.exists(productivity_path):
+            try:
+                productivity_df = pd.read_csv(productivity_path, dtype={"DAN_ID": str}, encoding="utf-8-sig")
+            except Exception:
+                try:
+                    productivity_df = pd.read_csv(productivity_path, dtype={"DAN_ID": str}, encoding="cp949")
+                except Exception:
+                    productivity_df = None
 
-normalized_df, location_df, coords_df = load_data()
+    return normalized_df, location_df, coords_df, productivity_df
+
+normalized_df, location_df, coords_df, productivity_df = load_data()
 
 # 한국어 주석: DB 또는 로컬에서 로드한 좌표 데이터로 DAN_COORD_MAP을 즉시 갱신합니다.
 # 이로써 앱의 모든 마커/반경 필터링이 NeonDB 기반 검증 좌표를 1순위로 사용합니다.
@@ -356,7 +472,7 @@ if candidate_master is not None:
 col1, col2 = st.columns([1.1, 0.9])
 
 if run_analysis_button and candidate_master is not None and normalized_df is not None:
-    with st.spinner("지표별 데이터 매칭 및 가중치 반영 연산 중..."):
+    with st.spinner("지표별 데이터 매칭, 브이월드 API 연동 및 AI 입주 자격 검증 진행 중..."):
         if location_df is not None and 'lat' in location_df.columns and 'lon' in location_df.columns:
             candidate_master['DAN_ID'] = candidate_master['DAN_ID'].astype(str)
             location_df['DAN_ID'] = location_df['DAN_ID'].astype(str)
@@ -374,16 +490,65 @@ if run_analysis_button and candidate_master is not None and normalized_df is not
             normalized_df,
             st.session_state.current_weights
         )
+        
+        # 2단계: 기업 입주 자격 검증 순차 루프 (5개 채울 때까지 재호출)
+        eligible_complexes = []
+        checked_info_map = {}
+        
+        current_idx = 0
+        max_search_limit = min(30, len(result_gdf))
+        
+        while len(eligible_complexes) < 5 and current_idx < max_search_limit:
+            row = result_gdf.iloc[current_idx]
+            dan_name = row['DAN_NAME']
+            dan_id = str(row['DAN_ID'])
+            
+            # 브이월드 API 호출
+            allowed_industries = get_vworld_allowed_industries(dan_name)
+            
+            # LLM 자격 검증 호출
+            eligibility = llm_client.check_industry_eligibility(dan_name, user_business, allowed_industries)
+            status = eligibility.get("status", "불가")
+            
+            checked_info_map[dan_id] = {
+                "status": status,
+                "matched": eligibility.get("matched_industry", "N/A"),
+                "analysis": eligibility.get("analysis", "")
+            }
+            
+            if status in ["가능", "조건부 가능"]:
+                eligible_complexes.append(row)
+                
+            current_idx += 1
+            
+        # 통과된 단지들로 top_5 구성 (만약 부족할 경우 대비해 폴백 장치 마련)
+        if eligible_complexes:
+            top_5_complexes = pd.DataFrame(eligible_complexes).head(5)
+        else:
+            top_5_complexes = result_gdf.head(5)
+            
+        top_5_names = top_5_complexes['DAN_NAME'].tolist()
+        
+        # 전체 result_gdf 데이터프레임에도 자격 정보 기입하여 테이블 노출 가능하도록 함
+        result_gdf['입주자격'] = '미검증'
+        result_gdf['매칭업종'] = 'N/A'
+        result_gdf['판정근거'] = '분석 미수행 (상위 5대 추천 외)'
+        
+        for d_id, info in checked_info_map.items():
+            mask = result_gdf['DAN_ID'].astype(str) == d_id
+            result_gdf.loc[mask, '입주자격'] = info['status']
+            result_gdf.loc[mask, '매칭업종'] = info['matched']
+            result_gdf.loc[mask, '판정근거'] = info['analysis']
+            
         st.session_state.result_gdf = result_gdf
+        st.session_state.checked_info_map = checked_info_map
+        st.session_state.eligible_top_5 = top_5_complexes
+        
         # 분석 실행에 실제 사용된 가중치 정보 동기화
         st.session_state.analyzed_weights = st.session_state.current_weights.copy()
         
-        top_5_complexes = result_gdf.head(5)
-        top_5_names = top_5_complexes['DAN_NAME'].tolist()
-        
         try:
             if "top_5_details" not in st.session_state or st.session_state.top_5_details_key != tuple(top_5_names):
-                # 단지명, 시군구명 및 대표 좌표(lat, lon)를 묶어 LLM 클라이언트에 전송
                 complexes_info = []
                 for _, row in top_5_complexes.iterrows():
                     dan_id = str(row['DAN_ID'])
@@ -454,11 +619,26 @@ with col1:
                 has_marked = True
                 short_desc = detail_info.get('short_desc', '상세 분석 정보가 로드되었습니다.') if detail_info else '상세 분석 정보가 로드되었습니다.'
                 
+                # 한국어 주석: 입주 자격 상태 정보 조회 및 뱃지 스타일링
+                elig_status = row.get('입주자격', '미검증')
+                elig_matched = row.get('매칭업종', 'N/A')
+                
+                if elig_status == "가능":
+                    status_badge = "<span style='background-color: #E8F5E9; color: #2E7D32; padding: 2px 5px; border-radius: 3px; font-weight: bold; font-size: 10px; margin-right: 5px;'>입주가능</span>"
+                elif elig_status == "조건부 가능":
+                    status_badge = "<span style='background-color: #FFF3E0; color: #E65100; padding: 2px 5px; border-radius: 3px; font-weight: bold; font-size: 10px; margin-right: 5px;'>조건부가능</span>"
+                else:
+                    status_badge = "<span style='background-color: #FFEBEE; color: #C62828; padding: 2px 5px; border-radius: 3px; font-weight: bold; font-size: 10px; margin-right: 5px;'>입주불가</span>"
+                
                 kakao_roadview_url = f"https://map.kakao.com/link/roadview/{lat},{lon}"
                 kakao_map_url = f"https://map.kakao.com/link/map/{dan_name},{lat},{lon}"
                 popup_html = f"""
                 <div style="font-family: Arial; width: 220px; padding: 5px;">
                     <h4 style="margin: 0 0 5px 0; color: #1f77b4; font-size: 14px;">🏆 {dan_name} ({rank}위)</h4>
+                    <div style="margin-bottom: 5px; display: flex; align-items: center; gap: 4px;">
+                        {status_badge}
+                        <span style="font-size: 10px; color: #555;">{elig_matched}</span>
+                    </div>
                     <b style="font-size: 12px; color: #2ca02c;">종합 평가 점수: {score}점</b>
                     <p style="font-size: 11px; margin: 5px 0 8px 0; color: #555; line-height: 1.4;"><i>"{short_desc}"</i></p>
                     <div style="margin-top: 8px; display: flex; gap: 5px; justify-content: center;">
@@ -570,7 +750,7 @@ with col2:
                 norm_llm_name = normalize_name(detail.get('dan_name', ''))
                 llm_info_map[norm_llm_name] = detail
         
-        top_5_complexes = result_gdf.head(5)
+        top_5_complexes = st.session_state.eligible_top_5 if "eligible_top_5" in st.session_state else result_gdf.head(5)
         for idx, (_, row) in enumerate(top_5_complexes.iterrows()):
             dan_name = row['DAN_NAME']
             dan_id = str(row['DAN_ID'])
@@ -589,12 +769,36 @@ with col2:
             if not detail_info and len(st.session_state.top_5_details) > idx:
                 detail_info = st.session_state.top_5_details[idx]
             
+            # 한국어 주석: 입주 자격 상태 정보 및 뱃지
+            elig_status = row.get('입주자격', '미검증')
+            elig_matched = row.get('매칭업종', 'N/A')
+            elig_analysis = row.get('판정근거', '자격 검증 내역이 없습니다.')
+            
+            if elig_status == "가능":
+                badge_html = "<span style='background-color: #E8F5E9; color: #2E7D32; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 11px; margin-right: 8px;'>입주 가능</span>"
+            elif elig_status == "조건부 가능":
+                badge_html = "<span style='background-color: #FFF3E0; color: #E65100; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 11px; margin-right: 8px;'>조건부 가능 (지자체 협의 필요)</span>"
+            else:
+                badge_html = "<span style='background-color: #FFEBEE; color: #C62828; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 11px; margin-right: 8px;'>입주 불가</span>"
+                
             st.markdown(f"#### **{rank}위: {dan_name}** `({score}점)`")
+            st.markdown(
+                f"<div style='margin-bottom: 8px; display: flex; align-items: center;'>"
+                f"{badge_html}"
+                f"<span style='font-size: 12px; color: #555;'>매칭 업종: <strong>{elig_matched}</strong></span>"
+                f"</div>", 
+                unsafe_allow_html=True
+            )
             
             short_desc = detail_info.get('short_desc', '상세 특성을 로드하는 데 실패했거나 검색 중입니다.') if detail_info else '상세 특성을 로드하는 데 실패했거나 검색 중입니다.'
             st.markdown(f"*{short_desc}*")
             
             with st.expander("더 자세한 상세정보 보기"):
+                # 한국어 주석: AI 입주 자격 심사 보고서 노출
+                st.markdown("##### 🤖 AI 입주 자격 심사 보고서")
+                st.info(elig_analysis)
+                st.write("")
+                
                 # 한국어 주석: 공통 함수를 사용하여 4단계 우선순위로 정확한 좌표 조회
                 row_lat, row_lon = get_complex_coordinates(dan_id, row=row, detail_info=detail_info, location_df=location_df)
 
@@ -629,34 +833,36 @@ with col2:
                 detail_desc = detail_info.get('detail_desc', '상세 설명 정보를 불러오지 못했습니다.') if detail_info else '상세 설명 정보를 불러오지 못했습니다.'
                 st.write(detail_desc)
                 
-                if detail_info:
-                    price_per_pyeong = str(detail_info.get('price_per_pyeong', '')).strip()
-                    recent_transaction_info = str(detail_info.get('recent_transaction_info', '')).strip()
+                # 한국어 주석: 예측 생산성 분석 (백만원 -> 원 단위 변환하여 출력)
+                st.markdown("---")
+                st.markdown("##### 📈 예측 생산성 분석 (최종 생산성)")
+                
+                prod_row = productivity_df[productivity_df["DAN_ID"] == dan_id] if productivity_df is not None else pd.DataFrame()
+                if not prod_row.empty:
+                    prod_val = prod_row.iloc[0]["최종_생산성(백만원/천제곱미터)"]
+                    prod_won = float(prod_val) * 1000000.0  # 백만원 단위를 원 단위로 환산
+                    source = prod_row.iloc[0].get("값출처", "모델 예측값")
                     
-                    # 결측치 체크 ("정보 없음", "N/A" 등 예외 처리)
-                    invalid_keywords = ["정보 없음", "정보없음", "n/a", "N/A", "확인 불가", "확인불가", "None", "none", "null"]
-                    is_price_valid = price_per_pyeong and not any(kw in price_per_pyeong.lower() for kw in invalid_keywords)
-                    is_info_valid = recent_transaction_info and not any(kw in recent_transaction_info.lower() for kw in invalid_keywords)
-                    
-                    st.markdown("---")
-                    st.markdown("##### 💰 FactoryON 실거래가 및 평당 시세 분석")
-                    
-                    if is_price_valid or is_info_valid:
-                        col_p1, col_p2 = st.columns([1, 2])
-                        with col_p1:
-                            # st.metric 대신 일반 텍스트 카드로 표현하여 텍스트 잘림("...") 방지
-                            st.markdown(
-                                f"<div style='background-color: #f0f2f6; padding: 12px; border-radius: 8px; border-left: 5px solid #ff4b4b; margin-bottom: 10px;'>"
-                                f"<span style='font-size: 12px; color: #555;'>평당 평균 시세</span><br>"
-                                f"<strong style='font-size: 16px; color: #111;'>{price_per_pyeong if is_price_valid else '검색 실패 (인근 시세 참고)'}</strong>"
-                                f"</div>", 
-                                unsafe_allow_html=True
-                            )
-                        with col_p2:
-                            st.markdown(f"**최근 실거래 내역 요약**\n\n{recent_transaction_info if is_info_valid else '최근 거래 이력 정보가 존재하지 않습니다.'}")
-                    else:
-                        st.warning("⚠️ 해당 산업단지 혹은 인근 행정구역의 최근 팩토리온 실거래 정보를 찾을 수 없습니다. (데이터 부족)")
-                    st.markdown("---")
+                    col_p1, col_p2 = st.columns([1.2, 1.8])
+                    with col_p1:
+                        st.markdown(
+                            f"<div style='background-color: #f0f7f4; padding: 12px; border-radius: 8px; border-left: 5px solid #2E7D32; margin-bottom: 10px;'>"
+                            f"<span style='font-size: 11px; color: #555;'>천㎡당 예측 생산성 (원)</span><br>"
+                            f"<strong style='font-size: 14px; color: #2E7D32;'>{int(prod_won):,} 원</strong>"
+                            f"</div>", 
+                            unsafe_allow_html=True
+                        )
+                    with col_p2:
+                        st.markdown(
+                            f"<div style='background-color: #f7f9fc; padding: 12px; border-radius: 8px; border-left: 5px solid #1f77b4; margin-bottom: 10px;'>"
+                            f"<span style='font-size: 11px; color: #666;'>데이터 분석 모델 출처</span><br>"
+                            f"<strong style='font-size: 13px; color: #1f77b4;'>{source}</strong>"
+                            f"</div>", 
+                            unsafe_allow_html=True
+                        )
+                else:
+                    st.warning("⚠️ 해당 산업단지의 예측 생산성 정보를 불러올 수 없습니다. (데이터 누락)")
+                st.markdown("---")
                 
                 score_df = pd.DataFrame({
                     "평가 지표": ["🏭 지역여건", "🚚 물류여건", "💡 산업혁신여건", "🏡 생활정주여건", "🚶 근로자이동여건"],
@@ -682,7 +888,7 @@ with col2:
         st.markdown("### 📋 전체 랭킹 테이블")
         output_df = pd.DataFrame(result_gdf.drop(columns="geometry"))
         display_cols = [
-            'rank', 'DAN_NAME', 'score', 
+            'rank', 'DAN_NAME', 'score', '입주자격', '매칭업종',
             '지역여건_점수', '물류여건_점수', 
             '산업혁신여건_점수', '생활정주여건_점수', '근로자이동여건_점수'
         ]
