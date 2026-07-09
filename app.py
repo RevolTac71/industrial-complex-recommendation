@@ -10,6 +10,10 @@ import numpy as np
 import os
 import glob
 from sqlalchemy import create_engine
+from dotenv import load_dotenv
+
+# .env 환경 변수 주입
+load_dotenv()
 
 from llm.client import GeminiLLMClient
 from llm.factory_api import get_nearest_transit
@@ -25,7 +29,12 @@ def get_vworld_allowed_industries(complex_name: str) -> list:
     """
     import requests
     
-    api_key = os.getenv("VWORLD_API_KEY", "D85A9D58-AD9A-378F-A6E6-F7AD0E79F4A1")
+    api_key = os.getenv("VWORLD_API_KEY")
+    if not api_key and "VWORLD_API_KEY" in st.secrets:
+        api_key = st.secrets["VWORLD_API_KEY"]
+    if not api_key:
+        api_key = "D85A9D58-AD9A-378F-A6E6-F7AD0E79F4A1"
+        
     url = "https://api.vworld.kr/req/data"
     
     # 1. 산업단지명 핵심 키워드 정제
