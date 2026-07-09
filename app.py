@@ -22,99 +22,6 @@ from analysis.default_pipeline import DefaultSpatialPipeline
 # EPSG:5174(보정 중부원점) -> EPSG:4326(WGS84 위경도) 좌표 변환 transformer 초기화
 transformer = Transformer.from_crs("epsg:5174", "epsg:4326", always_xy=True)
 
-def get_vworld_allowed_industries(complex_name: str) -> list:
-    """
-    사용자가 선택한 산업단지 이름(complex_name)을 기반으로 브이월드 데이터 API를 호출하여
-    허용 유치업종 목록을 반환합니다.
-    """
-    import requests
-    
-    api_key = os.getenv("VWORLD_API_KEY")
-    if not api_key and "VWORLD_API_KEY" in st.secrets:
-        api_key = st.secrets["VWORLD_API_KEY"]
-    if not api_key:
-        api_key = "D85A9D58-AD9A-378F-A6E6-F7AD0E79F4A1"
-        
-    url = "https://api.vworld.kr/req/data"
-    
-    # 1. 산업단지명 핵심 키워드 정제
-    clean_name = complex_name
-    for word in ["일반산업단지", "국가산업단지", "농공단지", "산업단지", "일반산단", "국가산단", "산단", "특별", "전문"]:
-        clean_name = clean_name.replace(word, "")
-    clean_name = clean_name.strip()
-    
-    search_candidates = [clean_name]
-    
-    # 특수문자 분할 후보 추가 (예: 신평·장림 -> 신평)
-    for char in ["·", ".", "-", "/"]:
-        if char in clean_name:
-            parts = [p.strip() for p in clean_name.split(char) if p.strip()]
-            if parts:
-                search_candidates.append(parts[0])
-                
-    # normalize_name 결과 추가
-    norm_name = clean_name
-    for char in [" ", "·", ".", "-", "(", ")"]:
-        norm_name = norm_name.replace(char, "")
-    if norm_name and norm_name not in search_candidates:
-        search_candidates.append(norm_name)
-        
-    # 첫 2~3글자 추가
-    if len(clean_name) >= 2:
-        search_candidates.append(clean_name[:2])
-        search_candidates.append(clean_name[:3])
-        
-    # 중복 제거
-    seen = set()
-    search_queries = []
-    for q in search_candidates:
-        if q and q not in seen:
-            seen.add(q)
-            search_queries.append(q)
-            
-    features = []
-    for query in search_queries:
-        try:
-            params = {
-                "key": api_key,
-                "domain": "http://localhost",
-                "service": "data",
-                "version": "2.0",
-                "request": "GetFeature",
-                "data": "LT_C_DAMYUCH",
-                "format": "json",
-                "size": 100,
-                "geomFilter": "BOX(124.0, 33.0, 132.0, 39.0)",  # 남한 전체 BOX로 우회
-                "attrFilter": f"dan_name:like:{query}"
-            }
-            response = requests.get(url, params=params, timeout=5)
-            if response.status_code == 200:
-                data = response.json()
-                if "response" in data and data["response"].get("status") == "OK":
-                    features = data["response"]["result"]["featureCollection"].get("features", [])
-                    if features:
-                        break
-        except Exception:
-            # 예외 처리: 다음 검색 후보 시도
-            pass
-            
-    allowed_industries = []
-    seen_industries = set()
-    for feat in features:
-        props = feat.get("properties", {})
-        upj_name = props.get("upj_name")
-        cat_nam = props.get("cat_nam")
-        if upj_name:
-            val = (upj_name, cat_nam)
-            if val not in seen_industries:
-                seen_industries.add(val)
-                allowed_industries.append({
-                    "induty_code": "N/A",
-                    "induty_nm": upj_name,
-                    "category_nm": cat_nam if cat_nam else "제조업"
-                })
-                
-    return allowed_industries
 
 # 한국어 주석: DAN_COORD_MAP은 하드코딩 백업값으로 초기화합니다.
 # 앱 시작 시 load_data()가 NeonDB의 dan_coords 테이블을 로드하여 이 맵을 갱신합니다.
@@ -319,16 +226,6 @@ if "recommendation_reason" in st.session_state and st.session_state.recommendati
     with st.sidebar.expander("💡 가중치 추천 근거 보기"):
         st.write(st.session_state.recommendation_reason)
 
-st.sidebar.write("---")
-
-# 기업 사업 설명 입력 영역 추가
-st.sidebar.subheader("🏭 기업 사업 설명 입력")
-user_business = st.sidebar.text_area(
-    "사용자의 사업 설명 (자연어)", 
-    value="자동차용 기계 부품 및 금속 가공 제조업",
-    height=100,
-    help="입력한 사업에 대해 브이월드 유치업종 API와 AI 에이전트가 단지별 입주 적합성을 자동 판정합니다."
-)
 
 
 # ==================== 단일 정규화 데이터 로드 (DB 연동) ====================
@@ -500,89 +397,10 @@ if run_analysis_button and candidate_master is not None and normalized_df is not
             st.session_state.current_weights
         )
         
-        # 2단계: 기업 입주 자격 검증 (상위 5개 단지에 대해 VWorld 조회 후 LLM 일괄 1회 호출)
-        top_5_complexes = result_gdf.head(5).copy()
+        top_5_complexes = result_gdf.head(5)
         top_5_names = top_5_complexes['DAN_NAME'].tolist()
         
-        # 1) 각 단지별 브이월드 유치업종 데이터 수집 (HTTP Get)
-        complexes_list = []
-        for _, row in top_5_complexes.iterrows():
-            dan_name = row['DAN_NAME']
-            allowed = get_vworld_allowed_industries(dan_name)
-            complexes_list.append({
-                "dan_name": dan_name,
-                "dan_id": str(row['DAN_ID']),
-                "allowed_industries": allowed
-            })
-            
-        # 2) LLM 1회 호출하여 5개 단지 일괄 판정 수행 (Quota 429 우회)
-        eligibility_response = llm_client.check_multiple_complexes_eligibility(complexes_list, user_business)
-        results_list = eligibility_response.get("results", [])
-        
-        # 3) 판정 결과를 checked_info_map으로 변환
-        checked_info_map = {}
-        for res in results_list:
-            res_name = res.get("dan_name", "")
-            status = res.get("status", "불가")
-            matched = res.get("matched_industry", "N/A")
-            analysis = res.get("analysis", "")
-            
-            # dan_id 기반 1대1 매핑 (이름 정규화 매칭은 폴백으로 지원)
-            matching_id = res.get("dan_id")
-            if not matching_id or not any(comp["dan_id"] == str(matching_id) for comp in complexes_list):
-                matching_id = None
-                norm_res_name = normalize_name(res_name)
-                for comp in complexes_list:
-                    norm_comp_name = normalize_name(comp["dan_name"])
-                    if norm_res_name and norm_comp_name and (norm_res_name in norm_comp_name or norm_comp_name in norm_res_name):
-                        matching_id = comp["dan_id"]
-                        break
-            else:
-                matching_id = str(matching_id)
-            
-            if matching_id:
-                # complexes_list에서 허용업종 원본 목록 추출
-                raw_allowed_list = []
-                for comp in complexes_list:
-                    if comp["dan_id"] == matching_id:
-                        raw_allowed = comp.get("allowed_industries", [])
-                        raw_allowed_list = [f"{ind.get('induty_nm')}({ind.get('category_nm', '제조업')})" for ind in raw_allowed]
-                        break
-                checked_info_map[matching_id] = {
-                    "status": status,
-                    "matched": matched,
-                    "analysis": analysis,
-                    "raw_allowed": ", ".join(raw_allowed_list) if raw_allowed_list else "고시 정보 없음 (제조업 입주 협의 필요)"
-                }
-                
-        # 미정의 단지 기본값 안전 처리
-        for comp in complexes_list:
-            c_id = comp["dan_id"]
-            if c_id not in checked_info_map:
-                raw_allowed = comp.get("allowed_industries", [])
-                raw_allowed_list = [f"{ind.get('induty_nm')}({ind.get('category_nm', '제조업')})" for ind in raw_allowed]
-                checked_info_map[c_id] = {
-                    "status": "조건부 가능",
-                    "matched": "N/A",
-                    "analysis": "AI 일괄 심사 응답 유실로 인한 기본 판정입니다.",
-                    "raw_allowed": ", ".join(raw_allowed_list) if raw_allowed_list else "고시 정보 없음 (제조업 입주 협의 필요)"
-                }
-        
-        # 전체 result_gdf 데이터프레임에도 자격 정보 기입하여 테이블 노출 가능하도록 함
-        result_gdf['입주자격'] = '미검증'
-        result_gdf['매칭업종'] = 'N/A'
-        result_gdf['판정근거'] = '분석 미수행 (상위 5대 추천 외)'
-        result_gdf['허용업종목록'] = '미검증'
-        
-        for d_id, info in checked_info_map.items():
-            mask = result_gdf['DAN_ID'].astype(str) == d_id
-            result_gdf.loc[mask, '입주자격'] = info['status']
-            result_gdf.loc[mask, '매칭업종'] = info['matched']
-            result_gdf.loc[mask, '판정근거'] = info['analysis']
-            result_gdf.loc[mask, '허용업종목록'] = info.get('raw_allowed', '정보 없음')
-            
         st.session_state.result_gdf = result_gdf
-        st.session_state.checked_info_map = checked_info_map
         st.session_state.eligible_top_5 = top_5_complexes
         
         # 분석 실행에 실제 사용된 가중치 정보 동기화
@@ -660,26 +478,11 @@ with col1:
                 has_marked = True
                 short_desc = detail_info.get('short_desc', '상세 분석 정보가 로드되었습니다.') if detail_info else '상세 분석 정보가 로드되었습니다.'
                 
-                # 한국어 주석: 입주 자격 상태 정보 조회 및 뱃지 스타일링
-                elig_status = row.get('입주자격', '미검증')
-                elig_matched = row.get('매칭업종', 'N/A')
-                
-                if elig_status == "가능":
-                    status_badge = "<span style='background-color: #E8F5E9; color: #2E7D32; padding: 2px 5px; border-radius: 3px; font-weight: bold; font-size: 10px; margin-right: 5px;'>입주가능</span>"
-                elif elig_status == "조건부 가능":
-                    status_badge = "<span style='background-color: #FFF3E0; color: #E65100; padding: 2px 5px; border-radius: 3px; font-weight: bold; font-size: 10px; margin-right: 5px;'>조건부가능</span>"
-                else:
-                    status_badge = "<span style='background-color: #FFEBEE; color: #C62828; padding: 2px 5px; border-radius: 3px; font-weight: bold; font-size: 10px; margin-right: 5px;'>입주불가</span>"
-                
                 kakao_roadview_url = f"https://map.kakao.com/link/roadview/{lat},{lon}"
                 kakao_map_url = f"https://map.kakao.com/link/map/{dan_name},{lat},{lon}"
                 popup_html = f"""
                 <div style="font-family: Arial; width: 220px; padding: 5px;">
                     <h4 style="margin: 0 0 5px 0; color: #1f77b4; font-size: 14px;">🏆 {dan_name} ({rank}위)</h4>
-                    <div style="margin-bottom: 5px; display: flex; align-items: center; gap: 4px;">
-                        {status_badge}
-                        <span style="font-size: 10px; color: #555;">{elig_matched}</span>
-                    </div>
                     <b style="font-size: 12px; color: #2ca02c;">종합 평가 점수: {score}점</b>
                     <p style="font-size: 11px; margin: 5px 0 8px 0; color: #555; line-height: 1.4;"><i>"{short_desc}"</i></p>
                     <div style="margin-top: 8px; display: flex; gap: 5px; justify-content: center;">
@@ -810,39 +613,12 @@ with col2:
             if not detail_info and len(st.session_state.top_5_details) > idx:
                 detail_info = st.session_state.top_5_details[idx]
             
-            # 한국어 주석: 입주 자격 상태 정보 및 뱃지
-            elig_status = row.get('입주자격', '미검증')
-            elig_matched = row.get('매칭업종', 'N/A')
-            elig_analysis = row.get('판정근거', '자격 검증 내역이 없습니다.')
-            
-            if elig_status == "가능":
-                badge_html = "<span style='background-color: #E8F5E9; color: #2E7D32; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 11px; margin-right: 8px;'>입주 가능</span>"
-            elif elig_status == "조건부 가능":
-                badge_html = "<span style='background-color: #FFF3E0; color: #E65100; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 11px; margin-right: 8px;'>조건부 가능 (지자체 협의 필요)</span>"
-            else:
-                badge_html = "<span style='background-color: #FFEBEE; color: #C62828; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 11px; margin-right: 8px;'>입주 불가</span>"
-                
             st.markdown(f"#### **{rank}위: {dan_name}** `({score}점)`")
-            st.markdown(
-                f"<div style='margin-bottom: 8px; display: flex; align-items: center;'>"
-                f"{badge_html}"
-                f"<span style='font-size: 12px; color: #555;'>매칭 업종: <strong>{elig_matched}</strong></span>"
-                f"</div>", 
-                unsafe_allow_html=True
-            )
             
             short_desc = detail_info.get('short_desc', '상세 특성을 로드하는 데 실패했거나 검색 중입니다.') if detail_info else '상세 특성을 로드하는 데 실패했거나 검색 중입니다.'
             st.markdown(f"*{short_desc}*")
             
             with st.expander("더 자세한 상세정보 보기"):
-                # 한국어 주석: AI 입주 자격 심사 보고서 노출
-                st.markdown("##### 🤖 AI 입주 자격 심사 보고서")
-                st.info(elig_analysis)
-                
-                # 브이월드 허용 업종 목록 표기
-                elig_raw = row.get('허용업종목록', '정보 없음')
-                st.markdown(f"**🏭 브이월드 고시 허용 유치업종:**\n> {elig_raw}")
-                st.write("")
                 
                 # 한국어 주석: 공통 함수를 사용하여 4단계 우선순위로 정확한 좌표 조회
                 row_lat, row_lon = get_complex_coordinates(dan_id, row=row, detail_info=detail_info, location_df=location_df)
