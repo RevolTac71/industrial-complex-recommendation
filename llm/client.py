@@ -113,9 +113,10 @@ class GeminiLLMClient:
         # 구글 검색 도구는 {"google_search": {}} 형식으로 지정합니다.
         search_grounding = "관련 논거 기사를 찾지 못했습니다."
         try:
+            # 구형 SDK 안정성 및 호환성 확보를 위해 검색 전용 1단계 모델은 gemini-2.5-flash와 google_search_retrieval 도구를 고정 사용합니다.
             search_model = genai.GenerativeModel(
-                model_name=model_name,
-                tools=["google_search"]
+                model_name="gemini-2.5-flash",
+                tools=[{"google_search_retrieval": {}}]
             )
             search_prompt = (
                 f"사용자의 산업단지 입지 요구사항인 '{user_input}'과 관련된 국내외 입지 기준, 정부 정책 뉴스 기사, "
@@ -195,9 +196,10 @@ class GeminiLLMClient:
                 dong_hints = "회동동, 석대동"
                 
             try:
+                # 구형 SDK 안정성 및 호환성 확보를 위해 검색 전용 1단계 모델은 gemini-2.5-flash와 google_search_retrieval 도구를 고정 사용합니다.
                 search_model = genai.GenerativeModel(
-                    model_name=model_name,
-                    tools=["google_search"]
+                    model_name="gemini-2.5-flash",
+                    tools=[{"google_search_retrieval": {}}]
                 )
                 search_prompt = (
                     f"대한민국 {sigungu} {dan_name} 산업단지 및 그 인근 지역({dong_hints if dong_hints else '인접 법정동/읍면동'})의 최근 부동산 실거래가, "
