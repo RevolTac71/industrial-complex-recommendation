@@ -27,7 +27,7 @@ DAN_COORD_MAP = {
     "226031": (35.1056, 128.9802),   # 신평.장림(기존) (하드코딩 백업)
     "226032": (35.1056, 128.9802),   # 신평.장림(협업) (하드코딩 백업)
     "326010": (35.2066, 129.1118),   # 회동·석대 (하드코딩 백업)
-    "248850": (35.2417, 128.8508),   # 서김해 (하드코딩 백업)
+    "248850": (35.2201, 128.8384),   # 서김해 (하드코딩 백업 - 입구 사거리 실좌표 보정)
 }
 
 def _build_coord_map_from_df(coords_df: pd.DataFrame):
@@ -225,7 +225,7 @@ st.sidebar.write("---")
 
 
 # ==================== 단일 정규화 데이터 로드 (DB 연동) ====================
-@st.cache_data
+@st.cache_data(ttl=600)
 def load_data():
     db_url = os.getenv("DATABASE_URL")
     if not db_url and "DATABASE_URL" in st.secrets:
