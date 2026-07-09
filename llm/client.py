@@ -20,13 +20,13 @@ class WeightRecommendation(BaseModel):
 
 class ComplexDetail(BaseModel):
     dan_name: str = Field(description="산업단지 이름")
-    lat: float = Field(description="산업단지의 대략적인 실제 위도 (latitude) 좌표. 반드시 부산, 울산, 경상남도 지리 범위 내의 유효값(35.0 ~ 35.6)을 실수형(float)으로 제시하십시오. 누락하거나 0.0을 주면 안 됩니다.")
-    lon: float = Field(description="산업단지의 대략적인 실제 경도 (longitude) 좌표. 반드시 부산, 울산, 경상남도 지리 범위 내의 유효값(128.5 ~ 129.4)을 실수형(float)으로 제시하십시오. 누락하거나 0.0을 주면 안 됩니다.")
+    lat: float = Field(description="산업단지 내부(임야, 바다 등)가 아닌, 구글 스트리트뷰(로드뷰) 파노라마가 실제로 촬영되어 존재하는 가장 가까운 인접 도로변 또는 진입로의 실제 위도 (latitude) 좌표. 반드시 부산, 울산, 경상남도 지리 범위 내의 유효값(35.0 ~ 35.6)을 실수형(float)으로 제시하십시오. 누락하거나 0.0을 주면 안 됩니다.")
+    lon: float = Field(description="산업단지 내부(임야, 바다 등)가 아닌, 구글 스트리트뷰(로드뷰) 파노라마가 실제로 촬영되어 존재하는 가장 가까운 인접 도로변 또는 진입로의 실제 경도 (longitude) 좌표. 반드시 부산, 울산, 경상남도 지리 범위 내의 유효값(128.5 ~ 129.4)을 실수형(float)으로 제시하십시오. 누락하거나 0.0을 주면 안 됩니다.")
 
     short_desc: str = Field(description="산업단지의 주요 특성 및 장점에 대한 한국어 한 줄 요약 (최대 60자)")
     detail_desc: str = Field(description="산업단지의 산업군 구성, 교통/정주 편의성, 향후 발전 방향 등을 담은 상세한 한국어 설명 (3~4문장)")
-    price_per_pyeong: str = Field(description="해당 산업단지 또는 인근 지역(시군구/읍면동)의 최근 공장/토지 평당 평균 실거래가 (예: '평당 약 150만 원'). 구체적인 금액과 단위를 명시하세요.")
-    recent_transaction_info: str = Field(description="최근 팩토리온/국토부 실거래 내역 요약 (예: '2025년 8월, 3,200㎡ 매매 15.5억 원, 평당 약 160만 원'). 구체적인 년월, 거래 규모, 총액을 포함하십시오.")
+    price_per_pyeong: str = Field(description="해당 산업단지 또는 인근 지역(시군구/읍면동/특정 동)의 최근 공장/토지 평당 평균 실거래가 (예: '평당 약 150만 원'). 팩토리온 정보를 구체적으로 기입하며, 찾기 어려운 경우 인근 유사 공업지역의 실거래가를 기준으로 유추하십시오.")
+    recent_transaction_info: str = Field(description="최근 팩토리온/국토부 실거래 내역 요약 (예: '2025년 8월, 3,200㎡ 매매 15.5억 원, 평당 약 160만 원'). 년월, 거래 규모, 거래액을 포함하며 정보가 없으면 '정보 없음'으로 처리하십시오.")
 
 class TopComplexesResponse(BaseModel):
     complexes: list[ComplexDetail] = Field(description="상위 산업단지 상세 정보 리스트")
@@ -148,7 +148,7 @@ class GeminiLLMClient:
         result = json.loads(response.text)
         return result
 
-    def get_top_complexes_details(self, complexes: list[str]) -> dict:
+    def get_top_complexes_details(self, complexes: list[dict]) -> dict:
         """
         상위 5개 산업단지명 리스트에 대한 정보(위도, 경도, 한줄 특성, 상세 특성)를
         구조화된 형태로 받아옵니다.
@@ -171,7 +171,7 @@ class GeminiLLMClient:
             else:
                 raise e
 
-    def _execute_top_complexes_details(self, complexes: list[str], model_name: str) -> dict:
+    def _execute_top_complexes_details(self, complexes: list[dict], model_name: str) -> dict:
         """
         실제 단지 상세 정보를 요청하는 핵심 로직.
         실시간 구글 검색을 활용하여 팩토리온(factoryon.go.kr) 및 최근 실거래가 데이터를 긁어와
@@ -180,24 +180,39 @@ class GeminiLLMClient:
         # 1단계: 각 산업단지에 대해 팩토리온 실거래가 실시간 검색 수행
         search_grounding_list = []
         for dan in complexes:
+            dan_name = dan.get('dan_name', '')
+            sigungu = dan.get('sigungu', '')
+            
+            # 검색 쿼리 극대화: 단지명, 시군구 및 인근 주요 법정동/읍면동(예: 센텀시티의 경우 해운대구 우동, 재송동)을 폭넓게 포괄하도록 구성
+            dong_hints = ""
+            if "센텀" in dan_name:
+                dong_hints = "우동, 재송동"
+            elif "신평" in dan_name or "장림" in dan_name:
+                dong_hints = "신평동, 장림동"
+            elif "금곡" in dan_name:
+                dong_hints = "금곡동"
+            elif "회동" in dan_name or "석대" in dan_name:
+                dong_hints = "회동동, 석대동"
+                
             try:
                 search_model = genai.GenerativeModel(
                     model_name=model_name,
                     tools=[{"google_search_retrieval": {}}]
                 )
                 search_prompt = (
-                    f"대한민국 산업단지 '{dan}'의 최근 부동산 실거래가, 팩토리온(factoryon.go.kr) 공장 실거래가, "
-                    f"혹은 해당 행정구역(시군구/읍면동) 인근 공업용지/공장 매매 평당 가격과 최근 실거래가 정보를 구글 검색을 통해 찾아주세요. "
-                    f"구체적인 거래 금액(만원, 억원 단위), 거래 면적(㎡), 계약 년월 정보를 포함하여 150자 내로 간결하게 한글로 서술하십시오."
+                    f"대한민국 {sigungu} {dan_name} 산업단지 및 그 인근 지역({dong_hints if dong_hints else '인접 법정동/읍면동'})의 최근 부동산 실거래가, "
+                    f"팩토리온(factoryon.go.kr)의 공장/토지 매매 실거래가 정보, 혹은 디스코(disco)나 밸류맵(valuemap)의 최근 평당 거래가를 구글 검색을 통해 찾아주세요. "
+                    f"특히 해당 지역의 공장용지 매매, 공장 매매 실거래 금액(억원/만원 단위), 거래 면적(㎡), 최근 계약일 정보를 최소 1~2건 이상 획득하여 평당 가격으로 정리해 주십시오."
                 )
                 search_response = search_model.generate_content(search_prompt)
                 if search_response and search_response.text:
-                    search_grounding_list.append(f"[{dan} 실거래 검색결과]\n{search_response.text}")
+                    search_grounding_list.append(f"[{dan_name} 실거래 검색결과]\n{search_response.text}")
             except Exception as e:
-                logging.warning(f"{dan} 실거래가 실시간 검색 실패 (일반 지식 기반 추론): {e}")
-                search_grounding_list.append(f"[{dan} 실거래 검색결과]\n검색 실패. 기존 데이터를 토대로 대략적인 시세를 추정하십시오.")
+                logging.warning(f"{dan_name} 실거래가 실시간 검색 실패 (일반 지식 기반 추론): {e}")
+                search_grounding_list.append(f"[{dan_name} 실거래 검색결과]\n검색 실패. 기존 데이터를 토대로 대략적인 시세를 추정하십시오.")
 
         combined_search_context = "\n\n".join(search_grounding_list)
+        complexes_names = [d.get('dan_name', '') for d in complexes]
 
         # 2단계: 수집된 실거래가 정보를 주입하여 구조화된 JSON 응답 생성
         model = genai.GenerativeModel(
@@ -210,14 +225,17 @@ class GeminiLLMClient:
             system_instruction=(
                 "당신은 대한민국 부울경(부산, 울산, 경상남도) 지역의 산업단지 및 토지/공장 부동산 실거래가 분석 전문가입니다. "
                 "주어진 산업단지들의 지리적 위도/경도 좌표를 제시하고, 각 산업단지의 고유 특성, 장점, 주력 산업군을 요약하십시오. "
-                "특히, 제공된 [실시간 실거래 검색결과]를 바탕으로 해당 산업단지 또는 인근 지역의 공장/토지 평당 실거래가(만원 단위)를 "
+                "특히 다음 사항을 준수하십시오:\n"
+                "1. 주어지는 위도/경도 좌표는 절대 산업단지 중심점(임야, 바다, 공장 지붕, 건물 내부 등)으로 지정하지 마십시오. "
+                "구글 스트리트뷰(로드뷰) 서비스가 정상적으로 지원되는 가장 가까운 인접 공도(도로변/진입로)의 실제 위도/경도 좌표로 보정하여 제공해야 합니다.\n"
+                "2. 제공된 [실시간 실거래 검색결과]를 바탕으로 해당 산업단지 또는 인근 지역의 공장/토지 평당 실거래가(만원 단위)를 "
                 "수학적으로 정확하게 계산하여 'price_per_pyeong'과 'recent_transaction_info' 필드에 기입해 주세요. "
-                "계산 공식: 평당 가격 = 거래금액 / (면적㎡ * 0.3025) 또는 (1㎡당 가격 * 3.3058)을 적용하십시오."
+                "계산 공식: 평당 가격 = 거래금액 / (면적㎡ * 0.3025) 또는 (1㎡당 가격 * 3.3058)을 적용하십시오. 만약 실거래 정보를 찾을 수 없는 경우 해당 필드는 '정보 없음'으로 처리하십시오."
                 f"\n\n[실시간 실거래 검색결과]\n{combined_search_context}"
             )
         )
         
-        prompt = f"다음 산업단지들의 지리적 위도/경도 좌표, 주요 특성, 그리고 평당 실거래가 분석 결과를 JSON으로 반환해 주세요:\n{', '.join(complexes)}"
+        prompt = f"다음 산업단지들의 지리적 위도/경도 좌표, 주요 특성, 그리고 평당 실거래가 분석 결과를 JSON으로 반환해 주세요:\n{', '.join(complexes_names)}"
         response = model.generate_content(prompt)
         result = json.loads(response.text)
         return result

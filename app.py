@@ -254,7 +254,12 @@ if run_analysis_button and candidate_master is not None and normalized_df is not
         
         try:
             if "top_5_details" not in st.session_state or st.session_state.top_5_details_key != tuple(top_5_names):
-                response = llm_client.get_top_complexes_details(top_5_names)
+                # 단지명과 시군구명을 묶어 검색 힌트를 보강해 LLM 클라이언트에 전송
+                complexes_info = [
+                    {"dan_name": row['DAN_NAME'], "sigungu": row.get('SIGUNGU_NM', '')} 
+                    for _, row in top_5_complexes.iterrows()
+                ]
+                response = llm_client.get_top_complexes_details(complexes_info)
                 st.session_state.top_5_details = response.get("complexes", [])
                 st.session_state.top_5_details_key = tuple(top_5_names)
         except Exception as e:
@@ -323,14 +328,18 @@ with col1:
                 
                 google_roadview_url = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lon}"
                 google_map_url = f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
+                google_roadview_embed_url = f"https://maps.google.com/maps?q=&layer=c&cbll={lat},{lon}&output=embed"
                 popup_html = f"""
-                <div style="font-family: Arial; width: 220px; padding: 5px;">
+                <div style="font-family: Arial; width: 260px; padding: 5px;">
                     <h4 style="margin: 0 0 5px 0; color: #1f77b4; font-size: 14px;">🏆 {dan_name} ({rank}위)</h4>
                     <b style="font-size: 12px; color: #2ca02c;">종합 평가 점수: {score}점</b>
-                    <p style="font-size: 11px; margin: 5px 0 0 0; color: #555; line-height: 1.4;"><i>"{short_desc}"</i></p>
-                    <div style="margin-top: 8px; display: flex; gap: 5px; justify-content: center;">
-                        <a href="{google_roadview_url}" target="_blank" style="display: inline-block; padding: 4px 8px; background-color: #4285F4; color: white; text-decoration: none; border-radius: 4px; font-size: 10px; font-weight: bold;">🛣️ 로드뷰</a>
-                        <a href="{google_map_url}" target="_blank" style="display: inline-block; padding: 4px 8px; background-color: #34A853; color: white; text-decoration: none; border-radius: 4px; font-size: 10px; font-weight: bold;">📍 구글맵</a>
+                    <p style="font-size: 11px; margin: 5px 0 8px 0; color: #555; line-height: 1.4;"><i>"{short_desc}"</i></p>
+                    <div style="margin-bottom: 8px; border-radius: 4px; overflow: hidden; border: 1px solid #ddd;">
+                        <iframe src="{google_roadview_embed_url}" width="100%" height="150" style="border:0;" allowfullscreen="" loading="lazy"></iframe>
+                    </div>
+                    <div style="display: flex; gap: 5px; justify-content: center;">
+                        <a href="{google_roadview_url}" target="_blank" style="display: inline-block; padding: 4px 8px; background-color: #4285F4; color: white; text-decoration: none; border-radius: 4px; font-size: 10px; font-weight: bold;">🛣️ 큰화면 로드뷰</a>
+                        <a href="{google_map_url}" target="_blank" style="display: inline-block; padding: 4px 8px; background-color: #34A853; color: white; text-decoration: none; border-radius: 4px; font-size: 10px; font-weight: bold;">📍 구글맵 이동</a>
                     </div>
                 </div>
                 """
@@ -339,7 +348,7 @@ with col1:
                 
                 folium.Marker(
                     location=[lat, lon],
-                    popup=folium.Popup(popup_html, max_width=240),
+                    popup=folium.Popup(popup_html, max_width=300),
                     icon=folium.Icon(color=marker_color, icon="star" if rank <= 3 else "info-sign")
                 ).add_to(candidates_group)
                 
@@ -392,16 +401,32 @@ with col2:
                 st.write(detail_desc)
                 
                 if detail_info:
-                    price_per_pyeong = detail_info.get('price_per_pyeong', '정보 없음')
-                    recent_transaction_info = detail_info.get('recent_transaction_info', '정보 없음')
+                    price_per_pyeong = str(detail_info.get('price_per_pyeong', '')).strip()
+                    recent_transaction_info = str(detail_info.get('recent_transaction_info', '')).strip()
+                    
+                    # 결측치 체크 ("정보 없음", "N/A" 등 예외 처리)
+                    invalid_keywords = ["정보 없음", "정보없음", "n/a", "N/A", "확인 불가", "확인불가", "None", "none", "null"]
+                    is_price_valid = price_per_pyeong and not any(kw in price_per_pyeong.lower() for kw in invalid_keywords)
+                    is_info_valid = recent_transaction_info and not any(kw in recent_transaction_info.lower() for kw in invalid_keywords)
                     
                     st.markdown("---")
                     st.markdown("##### 💰 FactoryON 실거래가 및 평당 시세 분석")
-                    col_p1, col_p2 = st.columns([1, 2])
-                    with col_p1:
-                        st.metric(label="평당 실거래 시세", value=price_per_pyeong)
-                    with col_p2:
-                        st.markdown(f"**최근 실거래 요약**\n\n{recent_transaction_info}")
+                    
+                    if is_price_valid or is_info_valid:
+                        col_p1, col_p2 = st.columns([1, 2])
+                        with col_p1:
+                            # st.metric 대신 일반 텍스트 카드로 표현하여 텍스트 잘림("...") 방지
+                            st.markdown(
+                                f"<div style='background-color: #f0f2f6; padding: 12px; border-radius: 8px; border-left: 5px solid #ff4b4b; margin-bottom: 10px;'>"
+                                f"<span style='font-size: 12px; color: #555;'>평당 평균 시세</span><br>"
+                                f"<strong style='font-size: 16px; color: #111;'>{price_per_pyeong if is_price_valid else '검색 실패 (인근 시세 참고)'}</strong>"
+                                f"</div>", 
+                                unsafe_allow_html=True
+                            )
+                        with col_p2:
+                            st.markdown(f"**최근 실거래 내역 요약**\n\n{recent_transaction_info if is_info_valid else '최근 거래 이력 정보가 존재하지 않습니다.'}")
+                    else:
+                        st.warning("⚠️ 해당 산업단지 혹은 인근 행정구역의 최근 팩토리온 실거래 정보를 찾을 수 없습니다. (데이터 부족)")
                     st.markdown("---")
                 
                 score_df = pd.DataFrame({
