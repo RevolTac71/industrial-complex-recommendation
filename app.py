@@ -289,11 +289,29 @@ if run_analysis_button and candidate_master is not None and normalized_df is not
         
         try:
             if "top_5_details" not in st.session_state or st.session_state.top_5_details_key != tuple(top_5_names):
-                # 단지명과 시군구명을 묶어 검색 힌트를 보강해 LLM 클라이언트에 전송
-                complexes_info = [
-                    {"dan_name": row['DAN_NAME'], "sigungu": row.get('SIGUNGU_NM', '')} 
-                    for _, row in top_5_complexes.iterrows()
-                ]
+                # 단지명, 시군구명 및 대표 좌표(lat, lon)를 묶어 LLM 클라이언트에 전송
+                complexes_info = []
+                for _, row in top_5_complexes.iterrows():
+                    dan_id = str(row['DAN_ID'])
+                    lat, lon = None, None
+                    if location_df is not None:
+                        match_df = location_df[location_df['DAN_ID'].astype(str) == dan_id]
+                        if not match_df.empty and 'lat' in match_df.columns:
+                            lat = float(match_df.iloc[0]['lat'])
+                            lon = float(match_df.iloc[0]['lon'])
+                    
+                    if lat is None or lon is None:
+                        geom = row.geometry
+                        if geom and geom.x != 0 and geom.y != 0:
+                            lat, lon = geom.y, geom.x
+                            
+                    complexes_info.append({
+                        "dan_name": row['DAN_NAME'],
+                        "sigungu": row.get('SIGUNGU_NM', ''),
+                        "lat": lat,
+                        "lon": lon
+                    })
+                    
                 industry_kw = st.session_state.get("industry_keyword", "기계")
                 response = llm_client.get_top_complexes_details(complexes_info, industry_kw)
                 st.session_state.top_5_details = response.get("complexes", [])

@@ -8,6 +8,7 @@ import os
 import requests
 import urllib.parse
 import pandas as pd
+from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -217,3 +218,70 @@ def get_land_price_stats(sigungu_name, dong_name):
     except Exception as e:
         print(f"⚠️ 실거래가 통계 산출 중 오류: {e}")
         return {"min": 0, "avg": 0, "max": 0, "count": 0, "text": "시세 분석 실패"}
+
+def get_nearest_transit(lat, lon):
+    """
+    Neon DB(PostgreSQL)의 subway_stations, bus_stations 테이블을 대상으로,
+    주어진 위경도(lat, lon)에서 가장 가까운 지하철역 및 버스정류장까지의 최단거리(km)와 명칭을 구합니다.
+    """
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        return {
+            "subway_text": "정보 없음 (DB 설정 누락)",
+            "bus_text": "정보 없음 (DB 설정 누락)"
+        }
+        
+    try:
+        engine = create_engine(db_url)
+        
+        # SQL 레벨 하버사인 구면 소팅 쿼리 (제한 1개)
+        subway_query = text("""
+            SELECT station_name, line_name,
+                   (6371 * acos(cos(radians(:lat)) * cos(radians(latitude)) * cos(radians(longitude) - radians(:lon)) + sin(radians(:lat)) * sin(radians(latitude)))) AS distance_km
+            FROM subway_stations
+            ORDER BY distance_km ASC
+            LIMIT 1
+        """)
+        
+        bus_query = text("""
+            SELECT station_name,
+                   (6371 * acos(cos(radians(:lat)) * cos(radians(latitude)) * cos(radians(longitude) - radians(:lon)) + sin(radians(:lat)) * sin(radians(latitude)))) AS distance_km
+            FROM bus_stations
+            ORDER BY distance_km ASC
+            LIMIT 1
+        """)
+        
+        with engine.connect() as conn:
+            # 1) 지하철역 쿼리
+            sub_res = conn.execute(subway_query, {"lat": float(lat), "lon": float(lon)}).fetchone()
+            # 2) 버스 정류장 쿼리
+            bus_res = conn.execute(bus_query, {"lat": float(lat), "lon": float(lon)}).fetchone()
+            
+        subway_text = "정보 없음"
+        if sub_res:
+            s_name, s_line, s_dist = sub_res[0], sub_res[1], float(sub_res[2])
+            if s_dist < 1.0:
+                dist_str = f"{int(s_dist * 1000)}m"
+            else:
+                dist_str = f"{s_dist:.2f}km"
+            subway_text = f"{s_name} ({s_line}, {dist_str})"
+            
+        bus_text = "정보 없음"
+        if bus_res:
+            b_name, b_dist = bus_res[0], float(bus_res[1])
+            if b_dist < 1.0:
+                dist_str = f"{int(b_dist * 1000)}m"
+            else:
+                dist_str = f"{b_dist:.2f}km"
+            bus_text = f"{b_name} ({dist_str})"
+            
+        return {
+            "subway_text": subway_text,
+            "bus_text": bus_text
+        }
+    except Exception as e:
+        print(f"⚠️ 대중교통 DB 쿼리 중 오류 발생: {e}")
+        return {
+            "subway_text": "정보 없음",
+            "bus_text": "정보 없음"
+        }

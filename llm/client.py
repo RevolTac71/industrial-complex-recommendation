@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 import google.generativeai as genai
 from pydantic import BaseModel, Field
 from .prompt_templates import SYSTEM_INSTRUCTION, USER_PROMPT_TEMPLATE
-from .factory_api import get_factory_cluster_density, get_land_price_stats
+from .factory_api import get_factory_cluster_density, get_land_price_stats, get_nearest_transit
 
 # 1. 환경 변수 로드
 load_dotenv()
@@ -192,6 +192,8 @@ class GeminiLLMClient:
         for dan in complexes:
             dan_name = dan.get('dan_name', '')
             sigungu = dan.get('sigungu', '')
+            lat = dan.get('lat')
+            lon = dan.get('lon')
             
             # 동 이름 매핑 힌트 (5대 산단 중심)
             dong_map = {
@@ -210,6 +212,9 @@ class GeminiLLMClient:
             # 2) 8354건의 로컬 2025 실거래가 데이터 기반 직관적 평당가 통계 획득
             price_info = get_land_price_stats(sigungu, dong_name)
             
+            # 3) Neon DB에 마이그레이션된 버스정류장/지하철역 최단거리 쿼리
+            transit_info = get_nearest_transit(lat, lon) if lat and lon else {"subway_text": "정보 없음", "bus_text": "정보 없음"}
+            
             companies_text = ", ".join([c["name"] for c in cluster_info["companies"]]) if cluster_info["companies"] else "정보 없음"
             
             grounding_data = (
@@ -218,6 +223,8 @@ class GeminiLLMClient:
                 f"- 해당 업종 입주 공장 수: {cluster_info['matched_count']}개 (분석 대상 {cluster_info['total_count']}개사 중 약 {cluster_info['density']}% 점유)\n"
                 f"- 입주 유사 기업명 예시: {companies_text}\n"
                 f"- 실제 평당 실거래가 통계: {price_info['text']}\n"
+                f"- DB 기반 가장 가까운 지하철역: {transit_info['subway_text']}\n"
+                f"- DB 기반 가장 가까운 버스정류장: {transit_info['bus_text']}\n"
             )
             search_grounding_list.append(grounding_data)
 
