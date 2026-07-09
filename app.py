@@ -527,10 +527,12 @@ if run_analysis_button and candidate_master is not None and normalized_df is not
             matched = res.get("matched_industry", "N/A")
             analysis = res.get("analysis", "")
             
-            # dan_name 매칭하여 dan_id 식별
+            # dan_name 매칭하여 dan_id 식별 (정규화 비교)
             matching_id = None
+            norm_res_name = normalize_name(res_name)
             for comp in complexes_list:
-                if comp["dan_name"] == res_name:
+                norm_comp_name = normalize_name(comp["dan_name"])
+                if norm_res_name and norm_comp_name and (norm_res_name in norm_comp_name or norm_comp_name in norm_res_name):
                     matching_id = comp["dan_id"]
                     break
             
