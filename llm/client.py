@@ -110,12 +110,12 @@ class GeminiLLMClient:
         실제 가중치 추천 요청을 전송하는 핵심 로직.
         """
         # 1단계: Google Search Grounding을 통해 실재하는 기사/논문 출처 수집 (토큰 최적화용 단문 요약)
-        # 구형 SDK 버전 계열을 사용하는 한, 모델명에 관계없이 구글 검색 도구는 항상 [{"google_search_retrieval": {}}] 로 단일 지정해야 에러가 발생하지 않습니다.
+        # 구글 검색 도구는 {"google_search": {}} 형식으로 지정합니다.
         search_grounding = "관련 논거 기사를 찾지 못했습니다."
         try:
             search_model = genai.GenerativeModel(
                 model_name=model_name,
-                tools=[{"google_search_retrieval": {}}]
+                tools=[{"google_search": {}}]
             )
             search_prompt = (
                 f"사용자의 산업단지 입지 요구사항인 '{user_input}'과 관련된 국내외 입지 기준, 정부 정책 뉴스 기사, "
@@ -197,7 +197,7 @@ class GeminiLLMClient:
             try:
                 search_model = genai.GenerativeModel(
                     model_name=model_name,
-                    tools=[{"google_search_retrieval": {}}]
+                    tools=[{"google_search": {}}]
                 )
                 search_prompt = (
                     f"대한민국 {sigungu} {dan_name} 산업단지 및 그 인근 지역({dong_hints if dong_hints else '인접 법정동/읍면동'})의 최근 부동산 실거래가, "
