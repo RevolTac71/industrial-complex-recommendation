@@ -1,6 +1,9 @@
 import os
 import json
 import logging
+import urllib.parse
+import requests
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import google.generativeai as genai
 from pydantic import BaseModel, Field
@@ -109,25 +112,9 @@ class GeminiLLMClient:
         """
         실제 가중치 추천 요청을 전송하는 핵심 로직.
         """
-        # 1단계: Google Search Grounding을 통해 실재하는 기사/논문 출처 수집 (토큰 최적화용 단문 요약)
-        # 구글 검색 도구는 {"google_search": {}} 형식으로 지정합니다.
-        search_grounding = "관련 논거 기사를 찾지 못했습니다."
-        try:
-            # 구형 SDK 안정성 및 호환성 확보를 위해 검색 전용 1단계 모델은 gemini-2.5-flash와 google_search_retrieval 도구를 고정 사용합니다.
-            search_model = genai.GenerativeModel(
-                model_name="gemini-2.5-flash",
-                tools=[{"google_search_retrieval": {}}]
-            )
-            search_prompt = (
-                f"사용자의 산업단지 입지 요구사항인 '{user_input}'과 관련된 국내외 입지 기준, 정부 정책 뉴스 기사, "
-                "또는 학술 연구 자료를 구글에서 찾은 뒤, 가장 대표성 있는 기사/논문의 [제목](URL 링크) 1~2개와 핵심 논거를 "
-                "최대 150자 내외로 매우 압축하여 한글로 기술해 주세요."
-            )
-            search_response = search_model.generate_content(search_prompt)
-            if search_response and search_response.text:
-                search_grounding = search_response.text
-        except Exception as e:
-            logging.warning(f"Google Search Grounding 비활성화 혹은 실패 (일반 LLM 추론으로 폴백): {e}")
+        # 1단계: 직접 구글 검색 페이지를 백엔드에서 스크레이핑하여 기사/논문 출처 수집 (API 툴 차단 및 400 에러 영구 차단)
+        search_prompt = f"산업단지 입지 선정 조건 '{user_input}' 관련 국내 언론 뉴스 보도자료 및 정책 연구"
+        search_grounding = google_search_fallback(search_prompt)
 
         # 2단계: 수집된 실재 기사/논문 링크 정보를 컨텍스트로 주입하여 최종 가중치 JSON 구조화 출력 생성
         struct_model = genai.GenerativeModel(
@@ -178,13 +165,13 @@ class GeminiLLMClient:
         실시간 구글 검색을 활용하여 팩토리온(factoryon.go.kr) 및 최근 실거래가 데이터를 긁어와
         평당 실거래 가격과 최근 계약 정보를 포함해 분석합니다.
         """
-        # 1단계: 각 산업단지에 대해 팩토리온 실거래가 실시간 검색 수행
+        # 1단계: 각 산업단지에 대해 백엔드 스크레이퍼를 사용하여 팩토리온/구글 실거래가 획득 (API 툴 오류 100% 영구 해결)
         search_grounding_list = []
         for dan in complexes:
             dan_name = dan.get('dan_name', '')
             sigungu = dan.get('sigungu', '')
             
-            # 검색 쿼리 극대화: 단지명, 시군구 및 인근 주요 법정동/읍면동(예: 센텀시티의 경우 해운대구 우동, 재송동)을 폭넓게 포괄하도록 구성
+            # 검색 쿼리 극대화
             dong_hints = ""
             if "센텀" in dan_name:
                 dong_hints = "우동, 재송동"
@@ -195,23 +182,13 @@ class GeminiLLMClient:
             elif "회동" in dan_name or "석대" in dan_name:
                 dong_hints = "회동동, 석대동"
                 
-            try:
-                # 구형 SDK 안정성 및 호환성 확보를 위해 검색 전용 1단계 모델은 gemini-2.5-flash와 google_search_retrieval 도구를 고정 사용합니다.
-                search_model = genai.GenerativeModel(
-                    model_name="gemini-2.5-flash",
-                    tools=[{"google_search_retrieval": {}}]
-                )
-                search_prompt = (
-                    f"대한민국 {sigungu} {dan_name} 산업단지 및 그 인근 지역({dong_hints if dong_hints else '인접 법정동/읍면동'})의 최근 부동산 실거래가, "
-                    f"팩토리온(factoryon.go.kr)의 공장/토지 매매 실거래가 정보, 혹은 디스코(disco)나 밸류맵(valuemap)의 최근 평당 거래가를 구글 검색을 통해 찾아주세요. "
-                    f"특히 해당 지역의 공장용지 매매, 공장 매매 실거래 금액(억원/만원 단위), 거래 면적(㎡), 최근 계약일 정보를 최소 1~2건 이상 획득하여 평당 가격으로 정리해 주십시오."
-                )
-                search_response = search_model.generate_content(search_prompt)
-                if search_response and search_response.text:
-                    search_grounding_list.append(f"[{dan_name} 실거래 검색결과]\n{search_response.text}")
-            except Exception as e:
-                logging.warning(f"{dan_name} 실거래가 실시간 검색 실패 (일반 지식 기반 추론): {e}")
-                search_grounding_list.append(f"[{dan_name} 실거래 검색결과]\n검색 실패. 기존 데이터를 토대로 대략적인 시세를 추정하십시오.")
+            location_query = f"{sigungu} {dan_name} 공장 토지 실거래가 매매 가격 팩토리온 디스코"
+            if dong_hints:
+                location_query += f" {dong_hints}"
+                
+            # 직접 백엔드 구글 스크레이퍼를 통해 팩토리온 실거래 정보를 획득합니다.
+            scrap_res = google_search_fallback(location_query)
+            search_grounding_list.append(f"[{dan_name} 실거래 검색결과]\n{scrap_res}")
 
         combined_search_context = "\n\n".join(search_grounding_list)
         complexes_names = [d.get('dan_name', '') for d in complexes]
@@ -241,4 +218,42 @@ class GeminiLLMClient:
         response = model.generate_content(prompt)
         result = json.loads(response.text)
         return result
+
+
+def google_search_fallback(query: str) -> str:
+    """
+    구형 SDK의 Google Search Grounding 도구 에러 문제를 해결하기 위해,
+    직접 구글 검색 결과를 백엔드에서 스크레이핑하여 텍스트로 반환합니다.
+    """
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        url = f"https://www.google.com/search?q={urllib.parse.quote(query)}"
+        res = requests.get(url, headers=headers, timeout=6)
+        if res.status_code != 200:
+            return "최근 실거래 정보를 획득하지 못했습니다. (네트워크 연결 문제)"
+            
+        soup = BeautifulSoup(res.text, "html.parser")
+        
+        search_results = []
+        for g in soup.select('div.g')[:5]:
+            title_el = g.select_one('h3')
+            snippet_el = g.select_one('div[style*="webkit-line-clamp"]') or g.select_one('div.VwiC3b') or g.select_one('span.aCOp2e')
+            
+            title = title_el.text.strip() if title_el else ""
+            snippet = snippet_el.text.strip() if snippet_el else ""
+            
+            if title:
+                search_results.append(f"- 제목: {title}\n  내용: {snippet}")
+                
+        if not search_results:
+            spans = [span.text.strip() for span in soup.find_all('span') if len(span.text.strip()) > 30]
+            if spans:
+                return "검색 스니펫 정보:\n" + "\n".join(spans[:3])
+            return "최근 관련 실거래 정보가 없습니다."
+            
+        return "\n\n".join(search_results)
+    except Exception as e:
+        return f"실거래가 검색 요약 (검색 중 에러): {str(e)}"
 
