@@ -28,9 +28,9 @@ IR_NAME_MAP = {
 
 def get_factory_cluster_density(dan_name_keyword, industry_keyword):
     """
-    특정 산업단지에서 사용자가 요구하는 업종 키워드에 해당하는 입주 공장의 비중 및 회사 샘플을 조회합니다.
+    로컬 CSV 캐시 파일(data/factory_registry_cache.csv)에서 
+    해당 산업단지의 유사 업종 기업들의 통계를 분석하여 오프라인으로 반환합니다.
     """
-    # 1. 단지명 매핑 변환
     target_ir_name = None
     for k, v in IR_NAME_MAP.items():
         if k in dan_name_keyword:
@@ -38,36 +38,90 @@ def get_factory_cluster_density(dan_name_keyword, industry_keyword):
             break
             
     if not target_ir_name:
-        # 매핑에 없을 시 예외 처리로 원본 키워드를 시도하되, 없으면 기본값 세팅
         target_ir_name = f"{dan_name_keyword}일반산업단지"
 
-    print(f"[API 호출] 산업단지명: {target_ir_name}, 업종키워드: {industry_keyword}")
+    csv_path = "./data/factory_registry_cache.csv"
+    
+    # 캐시 파일이 존재하지 않는 비상 상황에만 API 조회로 동적 폴백
+    if not os.path.exists(csv_path):
+        print(f"⚠️ [폴백] 로컬 캐시가 없어 온라인 API를 호출합니다: {target_ir_name}")
+        return get_factory_cluster_density_online(target_ir_name, industry_keyword)
 
+    print(f"[OFFLINE 조회] 산업단지명: {target_ir_name}, 업종키워드: {industry_keyword}")
+
+    try:
+        df = pd.read_csv(csv_path, encoding="utf-8-sig")
+        
+        # 1. irsttNm 컬럼 매칭 필터링
+        sub = df[df["irsttNm"] == target_ir_name].copy()
+        
+        # 2. 매칭된 행이 전혀 없을 시 부분 유사 명칭 검색으로 유연성 확보
+        if len(sub) == 0:
+            sub = df[df["irsttNm"].str.contains(dan_name_keyword, na=False)].copy()
+            
+        if len(sub) == 0:
+            return {"density": 0.0, "matched_count": 0, "total_count": 0, "companies": []}
+
+        # 3. 유사 업종 필터링
+        clean_industry = str(industry_keyword).strip().lower()
+        
+        # indutyNm(업종명) 또는 indutyCode(업종코드)에 해당 검색 키워드가 포함되어 있는지 대조
+        mask = (sub["indutyNm"].str.lower().str.contains(clean_industry, na=False)) | \
+               (sub["indutyCode"].str.lower().str.contains(clean_industry, na=False))
+               
+        matched_df = sub[mask].copy()
+        
+        # 회사명 기준 중복 제거
+        matched_df = matched_df.drop_duplicates(subset=["cmpnyNm"])
+        total_analyzed_df = sub.drop_duplicates(subset=["cmpnyNm"])
+        
+        total_analyzed = len(total_analyzed_df)
+        matched_cnt = len(matched_df)
+        density = (matched_cnt / total_analyzed * 100) if total_analyzed > 0 else 0.0
+        
+        # 결과 리스트 딕셔너리 정규화
+        matched_companies = []
+        for _, row in matched_df.iterrows():
+            matched_companies.append({
+                "name": row["cmpnyNm"],
+                "industry": row["indutyNm"],
+                "code": row["indutyCode"]
+            })
+
+        return {
+            "density": round(density, 1),
+            "matched_count": matched_cnt,
+            "total_count": total_analyzed,
+            "companies": matched_companies[:8]  # 최대 8개 샘플 반환 (Gemini 토큰 절약 최적화)
+        }
+        
+    except Exception as e:
+        print(f"⚠️ 로컬 캐시 조회 중 오류 발생: {e}")
+        return {"density": 0.0, "matched_count": 0, "total_count": 0, "companies": []}
+
+
+def get_factory_cluster_density_online(target_ir_name, industry_keyword):
+    """
+    [비상 폴백] 실시간 Open API를 통해 단지 등록 정보를 조회하는 온라인 오리지널 함수.
+    """
     params = {
         "serviceKey": API_KEY,
         "pageNo": "1",
-        "numOfRows": "300",  # 집적율 계산을 위해 대량 로드
+        "numOfRows": "300",
         "irsttNm": target_ir_name,
         "type": "JSON"
     }
 
     try:
-        # URL 디코딩 오류 방지를 위해 직접 쿼리스트링 조합 호출
         query_string = urllib.parse.urlencode(params)
         full_url = f"{BASE_URL}?{query_string}"
-        
-        # 타임아웃 8초 설정하여 API 지연 시 플랫폼이 뻗지 않도록 방어
         response = requests.get(full_url, timeout=8.0)
         
         if response.status_code != 200:
-            print(f"⚠️ 공장등록 API 호출 실패 (Status: {response.status_code})")
             return {"density": 0.0, "matched_count": 0, "total_count": 0, "companies": []}
             
         res_data = response.json()
-        
-        # 공공데이터 API 응답 바디 구조 파싱
         body = res_data.get("response", {}).get("body", {})
-        total_count = int(body.get("totalCount", 0))
         items_wrap = body.get("items", {})
         
         if not items_wrap or "item" not in items_wrap:
@@ -75,9 +129,8 @@ def get_factory_cluster_density(dan_name_keyword, industry_keyword):
             
         item_list = items_wrap["item"]
         if isinstance(item_list, dict):
-            item_list = [item_list]  # 단일 항목인 경우 리스트 치환
+            item_list = [item_list]
             
-        # 유사 업종 매칭 개수 및 회사 목록 수집
         matched_companies = []
         clean_industry = str(industry_keyword).strip().lower()
         
@@ -86,9 +139,7 @@ def get_factory_cluster_density(dan_name_keyword, industry_keyword):
             induty_code = str(item.get("indutyCode", "")).strip().lower()
             cmpny_nm = str(item.get("cmpnyNm", "")).strip()
             
-            # 업종명 또는 업종코드에 키워드가 매칭되는지 판정 (예: '반도체', 'C26')
             if clean_industry in induty_nm or clean_industry in induty_code:
-                # 중복 배제하여 리스트 기재
                 if cmpny_nm not in [c["name"] for c in matched_companies]:
                     matched_companies.append({
                         "name": cmpny_nm,
@@ -104,11 +155,9 @@ def get_factory_cluster_density(dan_name_keyword, industry_keyword):
             "density": round(density, 1),
             "matched_count": matched_cnt,
             "total_count": total_analyzed,
-            "companies": matched_companies[:8]  # 최대 8개 회사 샘플만 반환하여 프롬프트 토큰 최적화
+            "companies": matched_companies[:8]
         }
-
-    except Exception as e:
-        print(f"⚠️ 공장등록 API 데이터 수집 중 예외 발생: {e}")
+    except Exception:
         return {"density": 0.0, "matched_count": 0, "total_count": 0, "companies": []}
 
 def get_land_price_stats(sigungu_name, dong_name):

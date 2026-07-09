@@ -4,12 +4,40 @@ import geopandas as gpd
 from shapely.geometry import Point
 import folium
 from streamlit_folium import st_folium
+from folium.plugins import MarkerCluster
+from pyproj import Transformer
+import numpy as np
 import os
 import glob
 from sqlalchemy import create_engine
 
 from llm.client import GeminiLLMClient
 from analysis.default_pipeline import DefaultSpatialPipeline
+
+# EPSG:5174(보정 중부원점) -> EPSG:4326(WGS84 위경도) 좌표 변환 transformer 초기화
+transformer = Transformer.from_crs("epsg:5174", "epsg:4326", always_xy=True)
+
+def transform_coords(x, y):
+    try:
+        if pd.isna(x) or pd.isna(y):
+            return None, None
+        lon, lat = transformer.transform(float(x), float(y))
+        return lat, lon
+    except Exception:
+        return None, None
+
+def haversine_distance(lat1, lon1, lat2, lon2):
+    R = 6371.0  # 지구 반지름(km)
+    phi1 = np.radians(lat1)
+    phi2 = np.radians(lat2)
+    delta_phi = np.radians(lat2 - lat1)
+    delta_lambda = np.radians(lon2 - lon1)
+    
+    a = np.sin(delta_phi/2.0)**2 + \
+        np.cos(phi1) * np.cos(phi2) * \
+        np.sin(delta_lambda/2.0)**2
+    c = 2.0 * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
+    return R * c
 
 # 페이지 기본 설정
 st.set_page_config(page_title="산업단지 입지 추천 서비스", layout="wide")
@@ -359,7 +387,59 @@ with col1:
         if not has_marked:
             st.warning("⚠️ 상위 5개 산업단지의 위치 좌표 정보를 획득하지 못해 지도에 표시할 수 없습니다.")
             
-    folium.LayerControl().add_to(m)
+        # 5대 산단 좌표 추출 (반경 필터링용)
+        complex_centers = []
+        if "top_5_details" in st.session_state and st.session_state.top_5_details:
+            for complexes_detail in st.session_state.top_5_details:
+                clat = complexes_detail.get("lat")
+                clon = complexes_detail.get("lon")
+                if clat and clon:
+                    complex_centers.append((float(clat), float(clon)))
+
+        if complex_centers:
+            # 병원 및 편의점 레이어그룹 (MarkerCluster) 생성 (show=False로 기본 비활성화하여 지도 초기 로딩을 매우 쾌적하게 구성)
+            hospital_cluster = MarkerCluster(name="🏥 주변 병원 정보", show=False).add_to(m)
+            conv_cluster = MarkerCluster(name="🏪 주변 편의점 정보", show=False).add_to(m)
+
+            # 1) 병원 로드 및 3km 반경 필터링 매핑
+            hospital_csv = "./data/병원_영업_부울경.csv"
+            if os.path.exists(hospital_csv):
+                try:
+                    h_df = pd.read_csv(hospital_csv, encoding="utf-8-sig")
+                    for _, row in h_df.iterrows():
+                        x, y = row.get("좌표정보(X)"), row.get("좌표정보(Y)")
+                        if pd.notna(x) and pd.notna(y):
+                            lat, lon = transform_coords(x, y)
+                            if lat and lon:
+                                in_range = any(haversine_distance(lat, lon, clat, clon) <= 3.0 for clat, clon in complex_centers)
+                                if in_range:
+                                    folium.Marker(
+                                        location=[lat, lon],
+                                        popup=f"<b>{row.get('사업장명', '병원')}</b><br>{row.get('의료기관종별명', '병원')}<br>{row.get('도로명주소', '')}",
+                                        icon=folium.Icon(color="red", icon="plus-sign")
+                                    ).add_to(hospital_cluster)
+                except Exception as e:
+                    print(f"Hospital mapping error: {e}")
+
+            # 2) 편의점 로드 및 3km 반경 필터링 매핑
+            conv_csv = "./data/편의점_부울경.csv"
+            if os.path.exists(conv_csv):
+                try:
+                    c_df = pd.read_csv(conv_csv, encoding="utf-8-sig")
+                    for _, row in c_df.iterrows():
+                        lat, lon = row.get("LC_LA"), row.get("LC_LO")
+                        if pd.notna(lat) and pd.notna(lon):
+                            in_range = any(haversine_distance(lat, lon, clat, clon) <= 3.0 for clat, clon in complex_centers)
+                            if in_range:
+                                folium.Marker(
+                                    location=[lat, lon],
+                                    popup=f"<b>{row.get('POI_NM', '편의점')} {row.get('BHF_NM', '')}</b><br>{row.get('RDNMADR_NM', '')}",
+                                    icon=folium.Icon(color="blue", icon="shopping-cart")
+                                ).add_to(conv_cluster)
+                except Exception as e:
+                    print(f"Conv store mapping error: {e}")
+
+    folium.LayerControl(collapsed=False).add_to(m)
     st_folium(m, width="100%", height=650, returned_objects=[])
 
 with col2:
