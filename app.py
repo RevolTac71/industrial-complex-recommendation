@@ -527,14 +527,18 @@ if run_analysis_button and candidate_master is not None and normalized_df is not
             matched = res.get("matched_industry", "N/A")
             analysis = res.get("analysis", "")
             
-            # dan_name 매칭하여 dan_id 식별 (정규화 비교)
-            matching_id = None
-            norm_res_name = normalize_name(res_name)
-            for comp in complexes_list:
-                norm_comp_name = normalize_name(comp["dan_name"])
-                if norm_res_name and norm_comp_name and (norm_res_name in norm_comp_name or norm_comp_name in norm_res_name):
-                    matching_id = comp["dan_id"]
-                    break
+            # dan_id 기반 1대1 매핑 (이름 정규화 매칭은 폴백으로 지원)
+            matching_id = res.get("dan_id")
+            if not matching_id or not any(comp["dan_id"] == str(matching_id) for comp in complexes_list):
+                matching_id = None
+                norm_res_name = normalize_name(res_name)
+                for comp in complexes_list:
+                    norm_comp_name = normalize_name(comp["dan_name"])
+                    if norm_res_name and norm_comp_name and (norm_res_name in norm_comp_name or norm_comp_name in norm_res_name):
+                        matching_id = comp["dan_id"]
+                        break
+            else:
+                matching_id = str(matching_id)
             
             if matching_id:
                 # complexes_list에서 허용업종 원본 목록 추출
