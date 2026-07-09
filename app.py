@@ -18,16 +18,26 @@ from analysis.default_pipeline import DefaultSpatialPipeline
 # EPSG:5174(보정 중부원점) -> EPSG:4326(WGS84 위경도) 좌표 변환 transformer 초기화
 transformer = Transformer.from_crs("epsg:5174", "epsg:4326", always_xy=True)
 
-# 5대 추천 산단 DAN_ID → 중심 위경도 매핑 테이블 (대중교통 거리 계산용)
+# 한국어 주석: DAN_COORD_MAP은 하드코딩 백업값으로 초기화합니다.
+# 앱 시작 시 load_data()가 NeonDB의 dan_coords 테이블을 로드하여 이 맵을 갱신합니다.
 DAN_COORD_MAP = {
-    "326050": (35.2398, 128.9990),   # 금곡
-    "226040": (35.1690, 129.1281),   # 센텀시티
-    "226030": (35.1056, 128.9802),   # 신평·장림
-    "226031": (35.1056, 128.9802),   # 신평.장림(기존)
-    "226032": (35.1056, 128.9802),   # 신평.장림(협업)
-    "326010": (35.2066, 129.1118),   # 회동·석대
-    "248850": (35.2417, 128.8508),   # 서김해
+    "326050": (35.2398, 128.9990),   # 금곡 (하드코딩 백업)
+    "226040": (35.1690, 129.1281),   # 센텀시티 (하드코딩 백업)
+    "226030": (35.1056, 128.9802),   # 신평·장림 (하드코딩 백업)
+    "226031": (35.1056, 128.9802),   # 신평.장림(기존) (하드코딩 백업)
+    "226032": (35.1056, 128.9802),   # 신평.장림(협업) (하드코딩 백업)
+    "326010": (35.2066, 129.1118),   # 회동·석대 (하드코딩 백업)
+    "248850": (35.2417, 128.8508),   # 서김해 (하드코딩 백업)
 }
+
+def _build_coord_map_from_df(coords_df: pd.DataFrame):
+    """카카오 API 수집 좌표 DataFrame으로 DAN_COORD_MAP을 갱신합니다."""
+    for _, row in coords_df.iterrows():
+        if pd.notna(row.get("lat")) and pd.notna(row.get("lon")):
+            lat, lon = float(row["lat"]), float(row["lon"])
+            # 한국 내 좌표 범위(33~39N, 124~132E) 유효성 검증 후 삽입
+            if 33.0 <= lat <= 39.0 and 124.0 <= lon <= 132.0:
+                DAN_COORD_MAP[str(row["DAN_ID"])] = (lat, lon)
 
 def transform_coords(x, y):
     try:
@@ -50,6 +60,54 @@ def haversine_distance(lat1, lon1, lat2, lon2):
         np.sin(delta_lambda/2.0)**2
     c = 2.0 * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
     return R * c
+
+def get_complex_coordinates(dan_id, row=None, detail_info=None, location_df=None):
+    """
+    산업단지 ID와 행 데이터를 바탕으로 4단계 우선순위로 위경도(lat, lon)를 반환합니다.
+    1순위: DAN_COORD_MAP (NeonDB 또는 카카오 API 검증 WGS84 좌표)
+    2순위: geometry (GeoDataFrame의 실제 좌표)
+    3순위: location_df 내 lat/lon 컬럼
+    4순위: detail_info 내 LLM 추론 좌표 (한국 내 유효 범위 검증)
+    """
+    dan_id = str(dan_id)
+    lat, lon = None, None
+    
+    # 1순위: DAN_COORD_MAP
+    if dan_id in DAN_COORD_MAP:
+        lat, lon = DAN_COORD_MAP[dan_id]
+        
+    # 2순위: geometry
+    if lat is None or lon is None:
+        if row is not None and hasattr(row, 'geometry'):
+            geom = row.geometry
+            if geom and geom.x != 0 and geom.y != 0:
+                lat, lon = geom.y, geom.x
+                
+    # 3순위: location_df
+    if lat is None or lon is None:
+        if location_df is not None and 'lat' in (location_df.columns if hasattr(location_df, 'columns') else []):
+            loc_match = location_df[location_df['DAN_ID'].astype(str) == dan_id]
+            if not loc_match.empty:
+                l_lat = loc_match.iloc[0].get('lat')
+                l_lon = loc_match.iloc[0].get('lon')
+                if pd.notna(l_lat) and pd.notna(l_lon):
+                    lat, lon = float(l_lat), float(l_lon)
+                    
+    # 4순위: LLM 추론
+    if lat is None or lon is None:
+        if detail_info:
+            llm_lat = detail_info.get('lat')
+            llm_lon = detail_info.get('lon')
+            if llm_lat and llm_lon:
+                try:
+                    llm_lat, llm_lon = float(llm_lat), float(llm_lon)
+                    if 33.0 <= llm_lat <= 39.0 and 124.0 <= llm_lon <= 132.0:
+                        lat, lon = llm_lat, llm_lon
+                except (TypeError, ValueError):
+                    pass
+                    
+    return lat, lon
+
 
 # 페이지 기본 설정
 st.set_page_config(page_title="산업단지 입지 추천 서비스", layout="wide")
@@ -172,24 +230,34 @@ def load_data():
     db_url = os.getenv("DATABASE_URL")
     if not db_url and "DATABASE_URL" in st.secrets:
         db_url = st.secrets["DATABASE_URL"]
-        
+
     normalized_df = None
     location_df = None
-    
+    coords_df = None  # 한국어 주석: 카카오 API로 수집된 산업단지 WGS84 좌표 테이블
+
     if db_url:
         try:
             engine = create_engine(db_url)
-            # Neon DB에서 dan_normalized 데이터 쿼리
+            # NeonDB에서 정규화 데이터 로드
             normalized_df = pd.read_sql("SELECT * FROM dan_normalized", con=engine)
-            # Neon DB에서 dan_integrated 데이터 쿼리
+            # NeonDB에서 통합 데이터 로드 (lat/lon 컬럼 포함)
             location_df = pd.read_sql("SELECT * FROM dan_integrated", con=engine)
+            # NeonDB에서 카카오 수집 좌표 테이블 로드 (존재하는 경우)
+            try:
+                coords_df = pd.read_sql(
+                    "SELECT \"DAN_ID\", lat, lon FROM dan_coords WHERE lat IS NOT NULL",
+                    con=engine
+                )
+                coords_df["DAN_ID"] = coords_df["DAN_ID"].astype(str)
+            except Exception:
+                coords_df = None
         except Exception as e:
             st.warning(f"⚠️ DB 연결 실패, 로컬 백업 로드를 시도합니다: {e}")
-            
+
     # 로컬 fallback
     if normalized_df is None:
         data_dir = "./data"
-        
+
         # 정규화 데이터 탐색 및 로드
         norm_path = None
         for f in os.listdir(data_dir):
@@ -201,7 +269,7 @@ def load_data():
                 normalized_df = pd.read_csv(norm_path, encoding="utf-8")
             except Exception:
                 normalized_df = pd.read_csv(norm_path, encoding="cp949")
-                
+
         # 통합(위치) 데이터 탐색 및 로드
         integrated_path = None
         for f in os.listdir(data_dir):
@@ -214,9 +282,23 @@ def load_data():
             except Exception:
                 location_df = pd.read_csv(integrated_path, encoding="utf-8")
 
-    return normalized_df, location_df
+        # 한국어 주석: 로컬 fallback 시 dan_coords.csv로 좌표 보완
+        coords_path = os.path.join(data_dir, "dan_coords.csv")
+        if os.path.exists(coords_path):
+            try:
+                coords_df = pd.read_csv(coords_path, dtype={"DAN_ID": str}, encoding="utf-8-sig")
+                coords_df = coords_df[coords_df["lat"].notna()]
+            except Exception:
+                coords_df = None
 
-normalized_df, location_df = load_data()
+    return normalized_df, location_df, coords_df
+
+normalized_df, location_df, coords_df = load_data()
+
+# 한국어 주석: DB 또는 로컬에서 로드한 좌표 데이터로 DAN_COORD_MAP을 즉시 갱신합니다.
+# 이로써 앱의 모든 마커/반경 필터링이 NeonDB 기반 검증 좌표를 1순위로 사용합니다.
+if coords_df is not None and not coords_df.empty:
+    _build_coord_map_from_df(coords_df)
 
 candidate_master = None
 if normalized_df is not None:
@@ -305,17 +387,7 @@ if run_analysis_button and candidate_master is not None and normalized_df is not
                 complexes_info = []
                 for _, row in top_5_complexes.iterrows():
                     dan_id = str(row['DAN_ID'])
-                    lat, lon = None, None
-                    if location_df is not None:
-                        match_df = location_df[location_df['DAN_ID'].astype(str) == dan_id]
-                        if not match_df.empty and 'lat' in match_df.columns:
-                            lat = float(match_df.iloc[0]['lat'])
-                            lon = float(match_df.iloc[0]['lon'])
-                    
-                    if lat is None or lon is None:
-                        geom = row.geometry
-                        if geom and geom.x != 0 and geom.y != 0:
-                            lat, lon = geom.y, geom.x
+                    lat, lon = get_complex_coordinates(dan_id, row=row, location_df=location_df)
                             
                     complexes_info.append({
                         "dan_name": row['DAN_NAME'],
@@ -333,7 +405,11 @@ if run_analysis_button and candidate_master is not None and normalized_df is not
             st.session_state.top_5_details = []
 
 with col1:
-    st.subheader("🗺️ 입지 공간 시각화")
+    col_map_title, col_toggle = st.columns([2, 1])
+    with col_map_title:
+        st.subheader("🗺️ 입지 공간 시각화")
+    with col_toggle:
+        show_buffer = st.toggle("📏 반경 5km 버퍼 표시", value=False, key="show_buffer_5km")
     
     map_center = [35.25, 128.9]
     zoom_level = 9
@@ -371,22 +447,8 @@ with col1:
             if not detail_info and len(st.session_state.top_5_details) > idx:
                 detail_info = st.session_state.top_5_details[idx]
             
-            # 1. 로컬 CSV 좌표 우선 사용 -> 2. 2차 LLM 추론 좌표 사용 -> 3. geometry 좌표 사용 순서로 매핑
-            lat, lon = None, None
-            if location_df is not None:
-                match_df = location_df[location_df['DAN_ID'].astype(str) == dan_id]
-                if not match_df.empty and 'lat' in match_df.columns:
-                    lat = float(match_df.iloc[0]['lat'])
-                    lon = float(match_df.iloc[0]['lon'])
-            
-            if (lat is None or lon is None) and detail_info:
-                lat = detail_info.get('lat')
-                lon = detail_info.get('lon')
-            
-            if lat is None or lon is None:
-                geom = row.geometry
-                if geom and geom.x != 0 and geom.y != 0:
-                    lat, lon = geom.y, geom.x
+            # 한국어 주석: 공통 함수를 사용해 좌표 신뢰도 4단계 우선순위로 좌표 결정
+            lat, lon = get_complex_coordinates(dan_id, row=row, detail_info=detail_info, location_df=location_df)
             
             if lat is not None and lon is not None:
                 has_marked = True
@@ -414,17 +476,39 @@ with col1:
                     icon=folium.Icon(color=marker_color, icon="star" if rank <= 3 else "info-sign")
                 ).add_to(candidates_group)
                 
+                # 한국어 주석: 반경 5km 버퍼 반투명 원 시각화 추가
+                if show_buffer:
+                    buffer_color = "#ff4b4b" if rank == 1 else "#ffa500" if rank <= 3 else "#1f77b4"
+                    folium.Circle(
+                        location=[lat, lon],
+                        radius=5000,  # 5km (미터 단위)
+                        color=buffer_color,
+                        weight=1.5,
+                        fill=True,
+                        fill_color=buffer_color,
+                        fill_opacity=0.15,
+                        popup=folium.Popup(f"<b>{dan_name}</b> 반경 5km 분석권역", max_width=200)
+                    ).add_to(candidates_group)
+                
         if not has_marked:
             st.warning("⚠️ 상위 5개 산업단지의 위치 좌표 정보를 획득하지 못해 지도에 표시할 수 없습니다.")
             
-        # 5대 산단 좌표 추출 (반경 필터링용)
+        # 5대 산단 좌표 추출 (반경 필터링용) - 마커와 동일한 우선순위 로직 적용
         complex_centers = []
-        if "top_5_details" in st.session_state and st.session_state.top_5_details:
-            for complexes_detail in st.session_state.top_5_details:
-                clat = complexes_detail.get("lat")
-                clon = complexes_detail.get("lon")
-                if clat and clon:
-                    complex_centers.append((float(clat), float(clon)))
+        for _, crow in top_5_complexes.iterrows():
+            c_dan_id = str(crow['DAN_ID'])
+            # 한국어 주석: 매핑 테이블을 거치기 위해 해당하는 detail_info 찾기
+            c_detail = None
+            if "top_5_details" in st.session_state:
+                for d in st.session_state.top_5_details:
+                    if normalize_name(d.get('dan_name', '')) == normalize_name(crow['DAN_NAME']):
+                        c_detail = d
+                        break
+
+            clat, clon = get_complex_coordinates(c_dan_id, row=crow, detail_info=c_detail, location_df=location_df)
+
+            if clat and clon:
+                complex_centers.append((float(clat), float(clon)))
 
         if complex_centers:
             # 병원 및 편의점 레이어그룹 (MarkerCluster) 생성 (show=False로 기본 비활성화하여 지도 초기 로딩을 매우 쾌적하게 구성)
@@ -511,19 +595,8 @@ with col2:
             st.markdown(f"*{short_desc}*")
             
             with st.expander("더 자세한 상세정보 보기"):
-                # DB에서 직접 산업단지 좌표 기준 최단 대중교통 거리 실측값 조회
-                row_lat, row_lon = None, None
-                # 1) location_df에 lat/lon 컬럼이 있으면 그것을 사용
-                if location_df is not None and 'lat' in (location_df.columns if hasattr(location_df, 'columns') else []):
-                    loc_match = location_df[location_df['DAN_ID'].astype(str) == dan_id]
-                    if not loc_match.empty:
-                        row_lat = float(loc_match.iloc[0]['lat'])
-                        row_lon = float(loc_match.iloc[0]['lon'])
-                # 2) 없으면 DAN_COORD_MAP 매핑 테이블 사용 (5대 산단 하드코딩)
-                if row_lat is None:
-                    coords = DAN_COORD_MAP.get(dan_id)
-                    if coords:
-                        row_lat, row_lon = coords
+                # 한국어 주석: 공통 함수를 사용하여 4단계 우선순위로 정확한 좌표 조회
+                row_lat, row_lon = get_complex_coordinates(dan_id, row=row, detail_info=detail_info, location_df=location_df)
 
                 if row_lat and row_lon:
                     transit_data = get_nearest_transit(row_lat, row_lon)
