@@ -36,6 +36,9 @@ for k in keys:
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
+if "industry_keyword" not in st.session_state:
+    st.session_state.industry_keyword = "기계"
+
 llm_client = GeminiLLMClient()
 spatial_pipeline = DefaultSpatialPipeline()
 
@@ -76,6 +79,10 @@ if user_input := st.sidebar.chat_input("원하는 산업단지 요건을 자연�
     st.session_state.chat_history.append({"role": "user", "content": user_input})
     
     try:
+        # 사용자 자연어 질의에서 동적으로 업종 키워드 추출
+        industry_keyword = llm_client.extract_industry_keyword(user_input)
+        st.session_state.industry_keyword = industry_keyword
+        
         response = llm_client.get_weight_recommendation(user_input)
         recommendation_reason = response.get("reason", "가중치 비율을 추천했습니다.")
         
@@ -98,7 +105,7 @@ if user_input := st.sidebar.chat_input("원하는 산업단지 요건을 자연�
         
         st.session_state.chat_history.append({
             "role": "assistant", 
-            "content": f"{recommendation_reason}\n\n추천 분배 결과(총 100점 기준): {st.session_state.recommended_weights}"
+            "content": f"{recommendation_reason}\n\n추천 분배 결과(총 100점 기준): {st.session_state.recommended_weights}\n\n(분석 업종 기준: '{industry_keyword}')"
         })
     except Exception as e:
         st.session_state.chat_history.append({
@@ -259,7 +266,8 @@ if run_analysis_button and candidate_master is not None and normalized_df is not
                     {"dan_name": row['DAN_NAME'], "sigungu": row.get('SIGUNGU_NM', '')} 
                     for _, row in top_5_complexes.iterrows()
                 ]
-                response = llm_client.get_top_complexes_details(complexes_info)
+                industry_kw = st.session_state.get("industry_keyword", "기계")
+                response = llm_client.get_top_complexes_details(complexes_info, industry_kw)
                 st.session_state.top_5_details = response.get("complexes", [])
                 st.session_state.top_5_details_key = tuple(top_5_names)
         except Exception as e:

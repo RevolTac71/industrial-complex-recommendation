@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 import google.generativeai as genai
 from pydantic import BaseModel, Field
 from .prompt_templates import SYSTEM_INSTRUCTION, USER_PROMPT_TEMPLATE
+from .factory_api import get_factory_cluster_density, get_land_price_stats
 
 # 1. 환경 변수 로드
 load_dotenv()
@@ -136,7 +137,28 @@ class GeminiLLMClient:
         result = json.loads(response.text)
         return result
 
-    def get_top_complexes_details(self, complexes: list[dict]) -> dict:
+    def extract_industry_keyword(self, user_input: str) -> str:
+        """
+        사용자의 요구사항(자연어)에서 한국산업단지공단 공장등록 업종명(indutyNm) 매칭에
+        가장 적합한 단 하나의 대표 업종 키워드(예: 반도체, 자동차, 화학, 금속, 선박, 식품 등)를 추출합니다.
+        """
+        if not self.is_configured:
+            return "기계"
+            
+        model = genai.GenerativeModel(self.model_name)
+        prompt = (
+            "사용자의 산업단지 추천 요구사항에서 공장등록정보 업종 매칭을 위한 "
+            "단 하나의 핵심 한국어 명사 업종 키워드(예: 자동차, 반도체, 선박, 화학, 식품, 금속, 섬유 등)만 추출해 주세요.\n"
+            "출력은 아무런 부연 설명 없이 딱 단어 한 개만 반환해야 합니다.\n"
+            f"요구사항: {user_input}"
+        )
+        try:
+            response = model.generate_content(prompt)
+            return response.text.strip()
+        except Exception:
+            return "기계"
+
+    def get_top_complexes_details(self, complexes: list[dict], industry_keyword: str = "기계") -> dict:
         """
         상위 5개 산업단지명 리스트에 대한 정보(위도, 경도, 한줄 특성, 상세 특성)를
         구조화된 형태로 받아옵니다.
@@ -146,54 +168,61 @@ class GeminiLLMClient:
             raise ValueError("GEMINI_API_KEY가 설정되어 있지 않거나 설정에 실패했습니다.")
             
         try:
-            return self._execute_top_complexes_details(complexes, self.model_name)
+            return self._execute_top_complexes_details(complexes, industry_keyword, self.model_name)
         except Exception as e:
             err_msg = str(e).lower()
             if "429" in err_msg or "quota" in err_msg or "exhausted" in err_msg or "resource_exhausted" in err_msg:
                 logging.warning(f"기본 모델 {self.model_name} 쿼타 초과로 {self.fallback_model_name} 모델로 자동 전환 재시도합니다. 에러: {e}")
                 try:
-                    return self._execute_top_complexes_details(complexes, self.fallback_model_name)
+                    return self._execute_top_complexes_details(complexes, industry_keyword, self.fallback_model_name)
                 except Exception as ex:
                     logging.error(f"폴백 모델 {self.fallback_model_name} 실행 중에도 오류 발생: {ex}")
                     raise ex
             else:
                 raise e
 
-    def _execute_top_complexes_details(self, complexes: list[dict], model_name: str) -> dict:
+    def _execute_top_complexes_details(self, complexes: list[dict], industry_keyword: str, model_name: str) -> dict:
         """
         실제 단지 상세 정보를 요청하는 핵심 로직.
-        실시간 구글 검색을 활용하여 팩토리온(factoryon.go.kr) 및 최근 실거래가 데이터를 긁어와
-        평당 실거래 가격과 최근 계약 정보를 포함해 분석합니다.
+        공공데이터포털 공장등록정보 API 및 로컬 실거래가 통계 데이터를 결합하여 프롬프트 컨텍스트를 구성합니다.
         """
-        # 1단계: 각 산업단지에 대해 백엔드 스크레이퍼를 사용하여 팩토리온/구글 실거래가 획득 (API 툴 오류 100% 영구 해결)
         search_grounding_list = []
         for dan in complexes:
             dan_name = dan.get('dan_name', '')
             sigungu = dan.get('sigungu', '')
             
-            # 검색 쿼리 극대화
-            dong_hints = ""
-            if "센텀" in dan_name:
-                dong_hints = "우동, 재송동"
-            elif "신평" in dan_name or "장림" in dan_name:
-                dong_hints = "신평동, 장림동"
-            elif "금곡" in dan_name:
-                dong_hints = "금곡동"
-            elif "회동" in dan_name or "석대" in dan_name:
-                dong_hints = "회동동, 석대동"
-                
-            location_query = f"{sigungu} {dan_name} 공장 토지 실거래가 매매 가격 팩토리온 디스코"
-            if dong_hints:
-                location_query += f" {dong_hints}"
-                
-            # 직접 백엔드 구글 스크레이퍼를 통해 팩토리온 실거래 정보를 획득합니다.
-            scrap_res = google_search_fallback(location_query)
-            search_grounding_list.append(f"[{dan_name} 실거래 검색결과]\n{scrap_res}")
+            # 동 이름 매핑 힌트 (5대 산단 중심)
+            dong_map = {
+                "센텀": "우동",
+                "센텀시티": "우동",
+                "신평장림": "신평동",
+                "금곡": "금곡동",
+                "회동석대": "회동동",
+                "서김해": "주촌면"
+            }
+            dong_name = next((v for k, v in dong_map.items() if k in dan_name), "우동")
+            
+            # 1) 공공데이터포털 API를 통한 특정 업종 밀집도 데이터 분석
+            cluster_info = get_factory_cluster_density(dan_name, industry_keyword)
+            
+            # 2) 8354건의 로컬 2025 실거래가 데이터 기반 직관적 평당가 통계 획득
+            price_info = get_land_price_stats(sigungu, dong_name)
+            
+            companies_text = ", ".join([c["name"] for c in cluster_info["companies"]]) if cluster_info["companies"] else "정보 없음"
+            
+            grounding_data = (
+                f"[{dan_name} 실데이터 그라운딩]\n"
+                f"- 타겟 유사 업종: '{industry_keyword}'\n"
+                f"- 해당 업종 입주 공장 수: {cluster_info['matched_count']}개 (분석 대상 {cluster_info['total_count']}개사 중 약 {cluster_info['density']}% 점유)\n"
+                f"- 입주 유사 기업명 예시: {companies_text}\n"
+                f"- 실제 평당 실거래가 통계: {price_info['text']}\n"
+            )
+            search_grounding_list.append(grounding_data)
 
         combined_search_context = "\n\n".join(search_grounding_list)
         complexes_names = [d.get('dan_name', '') for d in complexes]
 
-        # 2단계: 수집된 실거래가 정보를 주입하여 구조화된 JSON 응답 생성
+        # 2단계: 수집된 정량적 실데이터 정보를 시스템 인스트럭션으로 주입하여 JSON 응답 생성
         model = genai.GenerativeModel(
             model_name=model_name,
             generation_config={
@@ -207,10 +236,10 @@ class GeminiLLMClient:
                 "특히 다음 사항을 준수하십시오:\n"
                 "1. 주어지는 위도/경도 좌표는 절대 산업단지 중심점(임야, 바다, 공장 지붕, 건물 내부 등)으로 지정하지 마십시오. "
                 "구글 스트리트뷰(로드뷰) 서비스가 정상적으로 지원되는 가장 가까운 인접 공도(도로변/진입로)의 실제 위도/경도 좌표로 보정하여 제공해야 합니다.\n"
-                "2. 제공된 [실시간 실거래 검색결과]를 바탕으로 해당 산업단지 또는 인근 지역의 공장/토지 평당 실거래가(만원 단위)를 "
-                "수학적으로 정확하게 계산하여 'price_per_pyeong'과 'recent_transaction_info' 필드에 기입해 주세요. "
-                "계산 공식: 평당 가격 = 거래금액 / (면적㎡ * 0.3025) 또는 (1㎡당 가격 * 3.3058)을 적용하십시오. 만약 실거래 정보를 찾을 수 없는 경우 해당 필드는 '정보 없음'으로 처리하십시오."
-                f"\n\n[실시간 실거래 검색결과]\n{combined_search_context}"
+                "2. 제공된 [실시간 정량 실데이터 분석 결과]를 바탕으로 해당 산업단지 또는 인근 지역의 공장/토지 평당 실거래가(만원 단위)와 최근 실거래 내역을 "
+                "그대로 인용 또는 수학적으로 계산하여 'price_per_pyeong'과 'recent_transaction_info' 필드에 기입해 주세요. "
+                "또한 'detail_desc' 필드 내에 해당 업종 입주 공장 수 및 집적도(%) 실데이터를 반드시 직접 인용하여 입지 적합성의 정량적 근거로 제시하십시오."
+                f"\n\n[실시간 정량 실데이터 분석 결과]\n{combined_search_context}"
             )
         )
         
