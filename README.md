@@ -14,11 +14,11 @@
 
 ## 실행
 
-Python 의존성은 `requirements.txt`에 있습니다. 일부 기능은 데이터베이스, 외부 API 및 환경 설정에 의존합니다. 저장소의 데이터·설정과 관련 문서를 확인한 후 실행하세요.
+Python 의존성은 `requirements.txt`에 있습니다. 앱은 `DATABASE_URL` 환경변수 또는 Streamlit 설정을 통해 데이터베이스에 연결하고, Gemini 연동은 `GEMINI_API_KEY`를 사용합니다.
 
 ```bash
 python -m pip install -r requirements.txt
 streamlit run app.py
 ```
 
-실행 환경 및 외부 서비스 연결은 이 문서 작성 시 검증하지 않았습니다. 추천 결과는 입력 데이터와 설정한 가중치에 영향을 받으므로 실제 입지 의사결정 전에 별도 확인이 필요합니다.
+
